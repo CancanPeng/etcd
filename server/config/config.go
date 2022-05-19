@@ -22,23 +22,28 @@ import (
 	"strings"
 	"time"
 
+	"go.etcd.io/etcd/client/pkg/v3/transport"
+	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/pkg/v3/netutil"
-	"go.etcd.io/etcd/pkg/v3/transport"
-	"go.etcd.io/etcd/pkg/v3/types"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v3discovery"
+	"go.etcd.io/etcd/server/v3/storage/datadir"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
 	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 // ServerConfig holds the configuration of etcd as taken from the command line or discovery.
 type ServerConfig struct {
-	Name           string
+	Name string
+
 	DiscoveryURL   string
 	DiscoveryProxy string
-	ClientURLs     types.URLs
-	PeerURLs       types.URLs
-	DataDir        string
+	DiscoveryCfg   v3discovery.DiscoveryConfig
+
+	ClientURLs types.URLs
+	PeerURLs   types.URLs
+	DataDir    string
 	// DedicatedWALDir config will make the etcd to write the WAL to the WALDir
 	// rather than the dataDir/member/wal.
 	DedicatedWALDir string
@@ -79,6 +84,10 @@ type ServerConfig struct {
 	TickMs        uint
 	ElectionTicks int
 
+	// WaitClusterReadyTimeout is the maximum time to wait for the
+	// cluster to be ready on startup before serving client requests.
+	WaitClusterReadyTimeout time.Duration
+
 	// InitialElectionTickAdvance is true, then local member fast-forwards
 	// election ticks to speed up "initial" leader election trigger. This
 	// benefits the case of larger election ticks. For instance, cross
@@ -113,13 +122,15 @@ type ServerConfig struct {
 	AutoCompactionRetention time.Duration
 	AutoCompactionMode      string
 	CompactionBatchLimit    int
+	CompactionSleepInterval time.Duration
 	QuotaBackendBytes       int64
 	MaxTxnOps               uint
 
 	// MaxRequestBytes is the maximum request size to send over raft.
 	MaxRequestBytes uint
 
-	WarningApplyDuration time.Duration
+	WarningApplyDuration        time.Duration
+	WarningUnaryRequestDuration time.Duration
 
 	StrictReconfigCheck bool
 
@@ -142,25 +153,23 @@ type ServerConfig struct {
 	SocketOpts transport.SocketOpts
 
 	// Logger logs server-side operations.
-	// If not nil, it disables "capnslog" and uses the given logger.
 	Logger *zap.Logger
-
-	// LoggerConfig is server logger configuration for Raft logger.
-	// Must be either: "LoggerConfig != nil" or "LoggerCore != nil && LoggerWriteSyncer != nil".
-	LoggerConfig *zap.Config
-	// LoggerCore is "zapcore.Core" for raft logger.
-	// Must be either: "LoggerConfig != nil" or "LoggerCore != nil && LoggerWriteSyncer != nil".
-	LoggerCore        zapcore.Core
-	LoggerWriteSyncer zapcore.WriteSyncer
 
 	ForceNewCluster bool
 
-	// EnableLeaseCheckpoint enables primary lessor to persist lease remainingTTL to prevent indefinite auto-renewal of long lived leases.
+	// EnableLeaseCheckpoint enables leader to send regular checkpoints to other members to prevent reset of remaining TTL on leader change.
 	EnableLeaseCheckpoint bool
 	// LeaseCheckpointInterval time.Duration is the wait duration between lease checkpoints.
 	LeaseCheckpointInterval time.Duration
+	// LeaseCheckpointPersist enables persisting remainingTTL to prevent indefinite auto-renewal of long lived leases. Always enabled in v3.6. Should be used to ensure smooth upgrade from v3.5 clusters with this feature enabled.
+	LeaseCheckpointPersist bool
 
 	EnableGRPCGateway bool
+
+	// ExperimentalEnableDistributedTracing enables distributed tracing using OpenTelemetry protocol.
+	ExperimentalEnableDistributedTracing bool
+	// ExperimentalTracerOptions are options for OpenTelemetry gRPC interceptor.
+	ExperimentalTracerOptions []otelgrpc.Option
 
 	WatchProgressNotifyInterval time.Duration
 
@@ -177,6 +186,20 @@ type ServerConfig struct {
 	// Currently all etcd memory gets mlocked, but in future the flag can
 	// be refined to mlock in-use area of bbolt only.
 	ExperimentalMemoryMlock bool `json:"experimental-memory-mlock"`
+
+	// ExperimentalTxnModeWriteWithSharedBuffer enable write transaction to use
+	// a shared buffer in its readonly check operations.
+	ExperimentalTxnModeWriteWithSharedBuffer bool `json:"experimental-txn-mode-write-with-shared-buffer"`
+
+	// ExperimentalBootstrapDefragThresholdMegabytes is the minimum number of megabytes needed to be freed for etcd server to
+	// consider running defrag during bootstrap. Needs to be set to non-zero value to take effect.
+	ExperimentalBootstrapDefragThresholdMegabytes uint `json:"experimental-bootstrap-defrag-threshold-megabytes"`
+
+	// ExperimentalMaxLearners sets a limit to the number of learner members that can exist in the cluster membership.
+	ExperimentalMaxLearners int `json:"experimental-max-learners"`
+
+	// V2Deprecation defines a phase of v2store deprecation process.
+	V2Deprecation V2DeprecationEnum `json:"v2-deprecation"`
 }
 
 // VerifyBootstrap sanity-checks the initial config for bootstrap case
@@ -274,18 +297,20 @@ func (c *ServerConfig) advertiseMatchesCluster() error {
 	return fmt.Errorf("failed to resolve %s to match --initial-cluster=%s (%v)", apStr, umap.String(), err)
 }
 
-func (c *ServerConfig) MemberDir() string { return filepath.Join(c.DataDir, "member") }
+func (c *ServerConfig) MemberDir() string { return datadir.ToMemberDir(c.DataDir) }
 
 func (c *ServerConfig) WALDir() string {
 	if c.DedicatedWALDir != "" {
 		return c.DedicatedWALDir
 	}
-	return filepath.Join(c.MemberDir(), "wal")
+	return datadir.ToWalDir(c.DataDir)
 }
 
 func (c *ServerConfig) SnapDir() string { return filepath.Join(c.MemberDir(), "snap") }
 
-func (c *ServerConfig) ShouldDiscover() bool { return c.DiscoveryURL != "" }
+func (c *ServerConfig) ShouldDiscover() bool {
+	return c.DiscoveryURL != "" || len(c.DiscoveryCfg.Endpoints) > 0
+}
 
 // ReqTimeout returns timeout for request to finish.
 func (c *ServerConfig) ReqTimeout() time.Duration {
@@ -324,4 +349,4 @@ func (c *ServerConfig) BootstrapTimeoutEffective() time.Duration {
 	return time.Second
 }
 
-func (c *ServerConfig) BackendPath() string { return filepath.Join(c.SnapDir(), "db") }
+func (c *ServerConfig) BackendPath() string { return datadir.ToBackendFileName(c.DataDir) }

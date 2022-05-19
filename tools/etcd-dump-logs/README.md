@@ -1,6 +1,36 @@
-### etcd-dump-logs
+# etcd-dump-logs
 
-etcd-dump-logs dumps the log from data directory.
+`etcd-dump-logs` dumps the log from data directory.
+
+## Installation
+
+Install the tool by running the following command from the etcd source directory.
+
+```
+  $ go install -v ./tools/etcd-dump-logs
+```
+
+The installation will place executables in the $GOPATH/bin. If $GOPATH environment variable is not set, the tool will be installed into the $HOME/go/bin. You can also find out the installed location by running the following command from the etcd source directory. Make sure that $PATH is set accordingly in your environment.
+
+```
+  $ go list -f "{{.Target}}" ./tools/etcd-dump-logs
+```
+
+Alternatively, instead of installing the tool, you can use it by simply running the following command from the etcd source directory.
+
+```
+  $ go run ./tools/etcd-dump-logs
+```
+
+## Usage
+
+The following command should output the usage per the latest development.
+
+```
+  $ etcd-dump-logs --help
+```
+
+An example of usage detail is provided below.
 
 ```
 Usage:
@@ -13,7 +43,9 @@ Usage:
                 - data_dir/member/wal/0000000000000000-0000000000000000.wal
 
 Flags:
-
+  -wal-dir string
+      If set, dumps WAL from the informed path, rather than following the
+      standard 'data_dir/member/wal/' location
   -entry-type string
     	If set, filters output by entry type. Must be one or more than one of:
 	    ConfigChange, Normal, Request, InternalRaftRequest,

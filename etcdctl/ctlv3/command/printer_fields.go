@@ -20,7 +20,6 @@ import (
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	spb "go.etcd.io/etcd/api/v3/mvccpb"
 	v3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/etcdctl/v3/snapshot"
 )
 
 type fieldsPrinter struct{ printer }
@@ -37,7 +36,12 @@ func (p *fieldsPrinter) kv(pfx string, kv *spb.KeyValue) {
 func (p *fieldsPrinter) hdr(h *pb.ResponseHeader) {
 	fmt.Println(`"ClusterID" :`, h.ClusterId)
 	fmt.Println(`"MemberID" :`, h.MemberId)
-	fmt.Println(`"Revision" :`, h.Revision)
+	// Revision only makes sense for k/v responses. For other kinds of
+	// responses, i.e. MemberList, usually the revision isn't populated
+	// at all; so it would be better to hide this field in these cases.
+	if h.Revision > 0 {
+		fmt.Println(`"Revision" :`, h.Revision)
+	}
 	fmt.Println(`"RaftTerm" :`, h.RaftTerm)
 }
 
@@ -156,7 +160,9 @@ func (p *fieldsPrinter) EndpointStatus(eps []epStatus) {
 	for _, ep := range eps {
 		p.hdr(ep.Resp.Header)
 		fmt.Printf("\"Version\" : %q\n", ep.Resp.Version)
+		fmt.Printf("\"StorageVersion\" : %q\n", ep.Resp.StorageVersion)
 		fmt.Println(`"DBSize" :`, ep.Resp.DbSize)
+		fmt.Println(`"DBSizeInUse" :`, ep.Resp.DbSizeInUse)
 		fmt.Println(`"Leader" :`, ep.Resp.Leader)
 		fmt.Println(`"IsLearner" :`, ep.Resp.IsLearner)
 		fmt.Println(`"RaftIndex" :`, ep.Resp.RaftIndex)
@@ -184,13 +190,6 @@ func (p *fieldsPrinter) Alarm(r v3.AlarmResponse) {
 		fmt.Println(`"AlarmType" :`, a.Alarm)
 		fmt.Println()
 	}
-}
-
-func (p *fieldsPrinter) DBStatus(r snapshot.Status) {
-	fmt.Println(`"Hash" :`, r.Hash)
-	fmt.Println(`"Revision" :`, r.Revision)
-	fmt.Println(`"Keys" :`, r.TotalKey)
-	fmt.Println(`"Size" :`, r.TotalSize)
 }
 
 func (p *fieldsPrinter) RoleAdd(role string, r v3.AuthRoleAddResponse) { p.hdr(r.Header) }

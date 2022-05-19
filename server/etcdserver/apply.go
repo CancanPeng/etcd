@@ -26,13 +26,15 @@ import (
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/membershippb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/pkg/v3/traceutil"
-	"go.etcd.io/etcd/pkg/v3/types"
 	"go.etcd.io/etcd/server/v3/auth"
 	"go.etcd.io/etcd/server/v3/etcdserver/api"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
+	"go.etcd.io/etcd/server/v3/etcdserver/version"
 	"go.etcd.io/etcd/server/v3/lease"
-	"go.etcd.io/etcd/server/v3/mvcc"
+	serverstorage "go.etcd.io/etcd/server/v3/storage"
+	"go.etcd.io/etcd/server/v3/storage/mvcc"
 
 	"github.com/gogo/protobuf/proto"
 	"go.uber.org/zap"
@@ -54,14 +56,14 @@ type applyResult struct {
 
 // applierV3Internal is the interface for processing internal V3 raft request
 type applierV3Internal interface {
-	ClusterVersionSet(r *membershippb.ClusterVersionSetRequest)
-	ClusterMemberAttrSet(r *membershippb.ClusterMemberAttrSetRequest)
-	DowngradeInfoSet(r *membershippb.DowngradeInfoSetRequest)
+	ClusterVersionSet(r *membershippb.ClusterVersionSetRequest, shouldApplyV3 membership.ShouldApplyV3)
+	ClusterMemberAttrSet(r *membershippb.ClusterMemberAttrSetRequest, shouldApplyV3 membership.ShouldApplyV3)
+	DowngradeInfoSet(r *membershippb.DowngradeInfoSetRequest, shouldApplyV3 membership.ShouldApplyV3)
 }
 
 // applierV3 is the interface for processing V3 raft messages
 type applierV3 interface {
-	Apply(r *pb.InternalRaftRequest) *applyResult
+	Apply(r *pb.InternalRaftRequest, shouldApplyV3 membership.ShouldApplyV3) *applyResult
 
 	Put(ctx context.Context, txn mvcc.TxnWrite, p *pb.PutRequest) (*pb.PutResponse, *traceutil.Trace, error)
 	Range(ctx context.Context, txn mvcc.TxnRead, r *pb.RangeRequest) (*pb.RangeResponse, error)
@@ -130,7 +132,7 @@ func (s *EtcdServer) newApplierV3() applierV3 {
 	)
 }
 
-func (a *applierV3backend) Apply(r *pb.InternalRaftRequest) *applyResult {
+func (a *applierV3backend) Apply(r *pb.InternalRaftRequest, shouldApplyV3 membership.ShouldApplyV3) *applyResult {
 	op := "unknown"
 	ar := &applyResult{}
 	defer func(start time.Time) {
@@ -141,6 +143,25 @@ func (a *applierV3backend) Apply(r *pb.InternalRaftRequest) *applyResult {
 			warnOfFailedRequest(a.s.Logger(), start, &pb.InternalRaftStringer{Request: r}, ar.resp, ar.err)
 		}
 	}(time.Now())
+
+	switch {
+	case r.ClusterVersionSet != nil: // Implemented in 3.5.x
+		op = "ClusterVersionSet"
+		a.s.applyV3Internal.ClusterVersionSet(r.ClusterVersionSet, shouldApplyV3)
+		return ar
+	case r.ClusterMemberAttrSet != nil:
+		op = "ClusterMemberAttrSet" // Implemented in 3.5.x
+		a.s.applyV3Internal.ClusterMemberAttrSet(r.ClusterMemberAttrSet, shouldApplyV3)
+		return ar
+	case r.DowngradeInfoSet != nil:
+		op = "DowngradeInfoSet" // Implemented in 3.5.x
+		a.s.applyV3Internal.DowngradeInfoSet(r.DowngradeInfoSet, shouldApplyV3)
+		return ar
+	}
+
+	if !shouldApplyV3 {
+		return nil
+	}
 
 	// call into a.s.applyV3.F instead of a.F so upper appliers can check individual calls
 	switch {
@@ -221,17 +242,8 @@ func (a *applierV3backend) Apply(r *pb.InternalRaftRequest) *applyResult {
 	case r.AuthRoleList != nil:
 		op = "AuthRoleList"
 		ar.resp, ar.err = a.s.applyV3.RoleList(r.AuthRoleList)
-	case r.ClusterVersionSet != nil:
-		op = "ClusterVersionSet"
-		a.s.applyV3Internal.ClusterVersionSet(r.ClusterVersionSet)
-	case r.ClusterMemberAttrSet != nil:
-		op = "ClusterMemberAttrSet"
-		a.s.applyV3Internal.ClusterMemberAttrSet(r.ClusterMemberAttrSet)
-	case r.DowngradeInfoSet != nil:
-		op = "DowngradeInfoSet"
-		a.s.applyV3Internal.DowngradeInfoSet(r.DowngradeInfoSet)
 	default:
-		panic("not implemented")
+		a.s.lg.Panic("not implemented apply", zap.Stringer("raft-request", r))
 	}
 	return ar
 }
@@ -245,7 +257,7 @@ func (a *applierV3backend) Put(ctx context.Context, txn mvcc.TxnWrite, p *pb.Put
 		trace = traceutil.New("put",
 			a.s.Logger(),
 			traceutil.Field{Key: "key", Value: string(p.Key)},
-			traceutil.Field{Key: "req_size", Value: proto.Size(p)},
+			traceutil.Field{Key: "req_size", Value: p.Size()},
 		)
 	}
 	val, leaseID := p.Value, lease.LeaseID(p.Lease)
@@ -325,8 +337,10 @@ func (a *applierV3backend) Range(ctx context.Context, txn mvcc.TxnRead, r *pb.Ra
 	resp := &pb.RangeResponse{}
 	resp.Header = &pb.ResponseHeader{}
 
+	lg := a.s.Logger()
+
 	if txn == nil {
-		txn = a.s.kv.Read(trace)
+		txn = a.s.kv.Read(mvcc.ConcurrentReadTxMode, trace)
 		defer txn.End()
 	}
 
@@ -376,6 +390,11 @@ func (a *applierV3backend) Range(ctx context.Context, txn mvcc.TxnRead, r *pb.Ra
 		// sorted by keys in lexiographically ascending order,
 		// sort ASCEND by default only when target is not 'KEY'
 		sortOrder = pb.RangeRequest_ASCEND
+	} else if r.SortTarget == pb.RangeRequest_KEY && sortOrder == pb.RangeRequest_ASCEND {
+		// Since current mvcc.Range implementation returns results
+		// sorted by keys in lexiographically ascending order,
+		// don't re-sort when target is 'KEY' and order is ASCEND
+		sortOrder = pb.RangeRequest_NONE
 	}
 	if sortOrder != pb.RangeRequest_NONE {
 		var sorter sort.Interface
@@ -390,6 +409,8 @@ func (a *applierV3backend) Range(ctx context.Context, txn mvcc.TxnRead, r *pb.Ra
 			sorter = &kvSortByMod{&kvSort{rr.KVs}}
 		case r.SortTarget == pb.RangeRequest_VALUE:
 			sorter = &kvSortByValue{&kvSort{rr.KVs}}
+		default:
+			lg.Panic("unexpected sort target", zap.Int32("sort-target", int32(r.SortTarget)))
 		}
 		switch {
 		case sortOrder == pb.RangeRequest_ASCEND:
@@ -424,7 +445,15 @@ func (a *applierV3backend) Txn(ctx context.Context, rt *pb.TxnRequest) (*pb.TxnR
 		ctx = context.WithValue(ctx, traceutil.TraceKey, trace)
 	}
 	isWrite := !isTxnReadonly(rt)
-	txn := mvcc.NewReadOnlyTxnWrite(a.s.KV().Read(trace))
+
+	// When the transaction contains write operations, we use ReadTx instead of
+	// ConcurrentReadTx to avoid extra overhead of copying buffer.
+	var txn mvcc.TxnWrite
+	if isWrite && a.s.Cfg.ExperimentalTxnModeWriteWithSharedBuffer {
+		txn = mvcc.NewReadOnlyTxnWrite(a.s.KV().Read(mvcc.SharedBufReadTxMode, trace))
+	} else {
+		txn = mvcc.NewReadOnlyTxnWrite(a.s.KV().Read(mvcc.ConcurrentReadTxMode, trace))
+	}
 
 	var txnPath []bool
 	trace.StepWithFunction(
@@ -625,7 +654,7 @@ func (a *applierV3backend) applyTxn(ctx context.Context, txn mvcc.TxnWrite, rt *
 			trace.StartSubTrace(
 				traceutil.Field{Key: "req_type", Value: "put"},
 				traceutil.Field{Key: "key", Value: string(tv.RequestPut.Key)},
-				traceutil.Field{Key: "req_size", Value: proto.Size(tv.RequestPut)})
+				traceutil.Field{Key: "req_size", Value: tv.RequestPut.Size()})
 			resp, _, err := a.Put(ctx, txn, tv.RequestPut)
 			if err != nil {
 				lg.Panic("unexpected error during txn", zap.Error(err))
@@ -703,6 +732,9 @@ func (a *applierV3backend) Alarm(ar *pb.AlarmRequest) (*pb.AlarmResponse, error)
 	case pb.AlarmRequest_GET:
 		resp.Alarms = a.s.alarmStore.Get(ar.Alarm)
 	case pb.AlarmRequest_ACTIVATE:
+		if ar.Alarm == pb.AlarmType_NONE {
+			break
+		}
 		m := a.s.alarmStore.Activate(types.ID(ar.MemberID), ar.Alarm)
 		if m == nil {
 			break
@@ -720,7 +752,7 @@ func (a *applierV3backend) Alarm(ar *pb.AlarmRequest) (*pb.AlarmResponse, error)
 		case pb.AlarmType_NOSPACE:
 			a.s.applyV3 = newApplierV3Capped(a)
 		default:
-			lg.Warn("unimplemented alarm activation", zap.String("alarm", fmt.Sprintf("%+v", m)))
+			lg.Panic("unimplemented alarm activation", zap.String("alarm", fmt.Sprintf("%+v", m)))
 		}
 	case pb.AlarmRequest_DEACTIVATE:
 		m := a.s.alarmStore.Deactivate(types.ID(ar.MemberID), ar.Alarm)
@@ -749,7 +781,7 @@ func (a *applierV3backend) Alarm(ar *pb.AlarmRequest) (*pb.AlarmResponse, error)
 
 type applierV3Capped struct {
 	applierV3
-	q backendQuota
+	q serverstorage.BackendQuota
 }
 
 // newApplierV3Capped creates an applyV3 that will reject Puts and transactions
@@ -903,35 +935,49 @@ func (a *applierV3backend) RoleList(r *pb.AuthRoleListRequest) (*pb.AuthRoleList
 	return resp, err
 }
 
-func (a *applierV3backend) ClusterVersionSet(r *membershippb.ClusterVersionSetRequest) {
-	a.s.cluster.SetVersion(semver.Must(semver.NewVersion(r.Ver)), api.UpdateCapability)
+func (a *applierV3backend) ClusterVersionSet(r *membershippb.ClusterVersionSetRequest, shouldApplyV3 membership.ShouldApplyV3) {
+	prevVersion := a.s.Cluster().Version()
+	newVersion := semver.Must(semver.NewVersion(r.Ver))
+	a.s.cluster.SetVersion(newVersion, api.UpdateCapability, shouldApplyV3)
+	// Force snapshot after cluster version downgrade.
+	if prevVersion != nil && newVersion.LessThan(*prevVersion) {
+		lg := a.s.Logger()
+		if lg != nil {
+			lg.Info("Cluster version downgrade detected, forcing snapshot",
+				zap.String("prev-cluster-version", prevVersion.String()),
+				zap.String("new-cluster-version", newVersion.String()),
+			)
+		}
+		a.s.forceSnapshot = true
+	}
 }
 
-func (a *applierV3backend) ClusterMemberAttrSet(r *membershippb.ClusterMemberAttrSetRequest) {
+func (a *applierV3backend) ClusterMemberAttrSet(r *membershippb.ClusterMemberAttrSetRequest, shouldApplyV3 membership.ShouldApplyV3) {
 	a.s.cluster.UpdateAttributes(
 		types.ID(r.Member_ID),
 		membership.Attributes{
 			Name:       r.MemberAttributes.Name,
 			ClientURLs: r.MemberAttributes.ClientUrls,
 		},
+		shouldApplyV3,
 	)
 }
 
-func (a *applierV3backend) DowngradeInfoSet(r *membershippb.DowngradeInfoSetRequest) {
-	d := membership.DowngradeInfo{Enabled: false}
+func (a *applierV3backend) DowngradeInfoSet(r *membershippb.DowngradeInfoSetRequest, shouldApplyV3 membership.ShouldApplyV3) {
+	d := version.DowngradeInfo{Enabled: false}
 	if r.Enabled {
-		d = membership.DowngradeInfo{Enabled: true, TargetVersion: r.Ver}
+		d = version.DowngradeInfo{Enabled: true, TargetVersion: r.Ver}
 	}
-	a.s.cluster.SetDowngradeInfo(&d)
+	a.s.cluster.SetDowngradeInfo(&d, shouldApplyV3)
 }
 
 type quotaApplierV3 struct {
 	applierV3
-	q Quota
+	q serverstorage.Quota
 }
 
 func newQuotaApplierV3(s *EtcdServer, app applierV3) applierV3 {
-	return &quotaApplierV3{app, NewBackendQuota(s, "v3-applier")}
+	return &quotaApplierV3{app, serverstorage.NewBackendQuota(s.Cfg, s.Backend(), "v3-applier")}
 }
 
 func (a *quotaApplierV3) Put(ctx context.Context, txn mvcc.TxnWrite, p *pb.PutRequest) (*pb.PutResponse, *traceutil.Trace, error) {

@@ -19,7 +19,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -54,7 +54,7 @@ See README.md for more examples.
 Example:
 
 # build etcd
-$ ./build.sh
+$ ./scripts/build.sh
 $ ./bin/etcd
 
 # build etcd-proxy
@@ -76,10 +76,24 @@ $ ./bin/etcdctl --endpoints localhost:23790 put foo bar`)
 		To:   url.URL{Scheme: "tcp", Host: to},
 	}
 	if verbose {
-		cfg.Logger = zap.NewExample()
+		var err error
+		cfg.Logger, err = zap.NewDevelopment()
+		if err != nil {
+			panic(err)
+		}
+		cfg.Logger = cfg.Logger.Named("proxy").With(
+			zap.String("from", from),
+			zap.String("to", to),
+			zap.Int("port", httpPort))
 	}
 	p := proxy.NewServer(cfg)
-	<-p.Ready()
+
+	select {
+	case <-p.Ready():
+	case err := <-p.Error():
+		panic(err)
+	}
+
 	defer p.Close()
 
 	mux := http.NewServeMux()
@@ -195,7 +209,7 @@ $ ./bin/etcdctl --endpoints localhost:23790 put foo bar`)
 	srv := &http.Server{
 		Addr:     fmt.Sprintf(":%d", httpPort),
 		Handler:  mux,
-		ErrorLog: log.New(ioutil.Discard, "net/http", 0),
+		ErrorLog: log.New(io.Discard, "net/http", 0),
 	}
 	defer srv.Close()
 

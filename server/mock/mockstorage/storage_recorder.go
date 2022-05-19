@@ -15,7 +15,8 @@
 package mockstorage
 
 import (
-	"go.etcd.io/etcd/pkg/v3/testutil"
+	"github.com/coreos/go-semver/semver"
+	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
@@ -57,4 +58,5 @@ func (p *storageRecorder) Sync() error {
 	return nil
 }
 
-func (p *storageRecorder) Close() error { return nil }
+func (p *storageRecorder) Close() error                        { return nil }
+func (p *storageRecorder) MinimalEtcdVersion() *semver.Version { return nil }

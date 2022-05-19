@@ -20,30 +20,31 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/ordering"
-	"go.etcd.io/etcd/tests/v3/integration"
+	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 func TestDetectKvOrderViolation(t *testing.T) {
-	var errOrderViolation = errors.New("Detected Order Violation")
+	var errOrderViolation = errors.New("DetectedOrderViolation")
 
-	integration.BeforeTest(t)
-	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
+	integration2.BeforeTest(t)
+	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3, UseBridge: true})
 	defer clus.Terminate(t)
 
 	cfg := clientv3.Config{
 		Endpoints: []string{
-			clus.Members[0].GRPCAddr(),
-			clus.Members[1].GRPCAddr(),
-			clus.Members[2].GRPCAddr(),
+			clus.Members[0].GRPCURL(),
+			clus.Members[1].GRPCURL(),
+			clus.Members[2].GRPCURL(),
 		},
 	}
-	cli, err := clientv3.New(cfg)
+	cli, err := integration2.NewClient(t, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cli.Close()
+	defer func() { assert.NoError(t, cli.Close()) }()
 	ctx := context.TODO()
 
 	if _, err = clus.Client(0).Put(ctx, "foo", "bar"); err != nil {
@@ -69,44 +70,48 @@ func TestDetectKvOrderViolation(t *testing.T) {
 		func(op clientv3.Op, resp clientv3.OpResponse, prevRev int64) error {
 			return errOrderViolation
 		})
-	_, err = orderingKv.Get(ctx, "foo")
+	v, err := orderingKv.Get(ctx, "foo")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("Read from the first member: v:%v err:%v", v, err)
+	assert.Equal(t, []byte("buzz"), v.Kvs[0].Value)
 
 	// ensure that only the third member is queried during requests
 	clus.Members[0].Stop(t)
 	clus.Members[1].Stop(t)
-	clus.Members[2].Restart(t)
+	assert.NoError(t, clus.Members[2].Restart(t))
 	// force OrderingKv to query the third member
-	cli.SetEndpoints(clus.Members[2].GRPCAddr())
+	cli.SetEndpoints(clus.Members[2].GRPCURL())
 	time.Sleep(2 * time.Second) // FIXME: Figure out how pause SetEndpoints sufficiently that this is not needed
 
-	_, err = orderingKv.Get(ctx, "foo", clientv3.WithSerializable())
+	t.Logf("Quering m2 after restart")
+	v, err = orderingKv.Get(ctx, "foo", clientv3.WithSerializable())
+	t.Logf("Quering m2 returned: v:%v erro:%v ", v, err)
 	if err != errOrderViolation {
-		t.Fatalf("expected %v, got %v", errOrderViolation, err)
+		t.Fatalf("expected %v, got err:%v v:%v", errOrderViolation, err, v)
 	}
 }
 
 func TestDetectTxnOrderViolation(t *testing.T) {
-	var errOrderViolation = errors.New("Detected Order Violation")
+	var errOrderViolation = errors.New("DetectedOrderViolation")
 
-	integration.BeforeTest(t)
-	clus := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 3})
+	integration2.BeforeTest(t)
+	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3, UseBridge: true})
 	defer clus.Terminate(t)
 
 	cfg := clientv3.Config{
 		Endpoints: []string{
-			clus.Members[0].GRPCAddr(),
-			clus.Members[1].GRPCAddr(),
-			clus.Members[2].GRPCAddr(),
+			clus.Members[0].GRPCURL(),
+			clus.Members[1].GRPCURL(),
+			clus.Members[2].GRPCURL(),
 		},
 	}
-	cli, err := clientv3.New(cfg)
+	cli, err := integration2.NewClient(t, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cli.Close()
+	defer func() { assert.NoError(t, cli.Close()) }()
 	ctx := context.TODO()
 
 	if _, err = clus.Client(0).Put(ctx, "foo", "bar"); err != nil {
@@ -144,9 +149,9 @@ func TestDetectTxnOrderViolation(t *testing.T) {
 	// ensure that only the third member is queried during requests
 	clus.Members[0].Stop(t)
 	clus.Members[1].Stop(t)
-	clus.Members[2].Restart(t)
+	assert.NoError(t, clus.Members[2].Restart(t))
 	// force OrderingKv to query the third member
-	cli.SetEndpoints(clus.Members[2].GRPCAddr())
+	cli.SetEndpoints(clus.Members[2].GRPCURL())
 	time.Sleep(2 * time.Second) // FIXME: Figure out how pause SetEndpoints sufficiently that this is not needed
 	_, err = orderingKv.Get(ctx, "foo", clientv3.WithSerializable())
 	if err != errOrderViolation {

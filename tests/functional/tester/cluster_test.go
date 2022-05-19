@@ -20,8 +20,7 @@ import (
 	"testing"
 
 	"go.etcd.io/etcd/tests/v3/functional/rpcpb"
-
-	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
 )
 
 func Test_read(t *testing.T) {
@@ -65,6 +64,8 @@ func Test_read(t *testing.T) {
 					Logger:              "zap",
 					LogOutputs:          []string{"/tmp/etcd-functional-1/etcd.log"},
 					LogLevel:            "info",
+					SocketReuseAddress:  true,
+					SocketReusePort:     true,
 				},
 				ClientCertData:      "",
 				ClientCertPath:      "",
@@ -118,6 +119,8 @@ func Test_read(t *testing.T) {
 					Logger:              "zap",
 					LogOutputs:          []string{"/tmp/etcd-functional-2/etcd.log"},
 					LogLevel:            "info",
+					SocketReuseAddress:  true,
+					SocketReusePort:     true,
 				},
 				ClientCertData:      "",
 				ClientCertPath:      "",
@@ -171,6 +174,8 @@ func Test_read(t *testing.T) {
 					Logger:              "zap",
 					LogOutputs:          []string{"/tmp/etcd-functional-3/etcd.log"},
 					LogLevel:            "info",
+					SocketReuseAddress:  true,
+					SocketReusePort:     true,
 				},
 				ClientCertData:      "",
 				ClientCertPath:      "",
@@ -256,10 +261,7 @@ func Test_read(t *testing.T) {
 		},
 	}
 
-	logger, err := zap.NewProduction()
-	if err != nil {
-		t.Fatal(err)
-	}
+	logger := zaptest.NewLogger(t)
 	defer logger.Sync()
 
 	cfg, err := read(logger, "../functional.yaml")

@@ -30,18 +30,18 @@ import (
 	"testing"
 	"time"
 
+	"go.etcd.io/etcd/client/pkg/v3/testutil"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/pkg/v3/testutil"
-	"go.etcd.io/etcd/pkg/v3/transport"
 	"go.etcd.io/etcd/server/v3/embed"
-	"go.etcd.io/etcd/tests/v3/integration"
+	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 var (
 	testTLSInfo = transport.TLSInfo{
-		KeyFile:        integration.MustAbsPath("../../fixtures/server.key.insecure"),
-		CertFile:       integration.MustAbsPath("../../fixtures/server.crt"),
-		TrustedCAFile:  integration.MustAbsPath("../../fixtures/ca.crt"),
+		KeyFile:        integration2.MustAbsPath("../../fixtures/server.key.insecure"),
+		CertFile:       integration2.MustAbsPath("../../fixtures/server.crt"),
+		TrustedCAFile:  integration2.MustAbsPath("../../fixtures/ca.crt"),
 		ClientCertAuth: true,
 	}
 )
@@ -119,8 +119,9 @@ func TestEmbedEtcd(t *testing.T) {
 		e.Close()
 		select {
 		case err := <-e.Err():
-			t.Errorf("#%d: unexpected error on close (%v)", i, err)
-		default:
+			if err != nil {
+				t.Errorf("#%d: unexpected error on close (%v)", i, err)
+			}
 		}
 	}
 }
@@ -159,7 +160,7 @@ func testEmbedEtcdGracefulStop(t *testing.T, secure bool) {
 			t.Fatal(err)
 		}
 	}
-	cli, err := clientv3.New(clientCfg)
+	cli, err := integration2.NewClient(t, clientCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,11 +175,13 @@ func testEmbedEtcdGracefulStop(t *testing.T, secure bool) {
 		close(donec)
 	}()
 	select {
-	case err := <-e.Err():
-		t.Fatal(err)
 	case <-donec:
 	case <-time.After(2*time.Second + e.Server.Cfg.ReqTimeout()):
 		t.Fatalf("took too long to close server")
+	}
+	err = <-e.Err()
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -17,16 +17,15 @@ package snap
 import (
 	"fmt"
 	"hash/crc32"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
-	"go.etcd.io/etcd/pkg/v3/fileutil"
+	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/raft/v3/raftpb"
-	"go.etcd.io/etcd/server/v3/wal/walpb"
-	"go.uber.org/zap"
+	"go.etcd.io/etcd/server/v3/storage/wal/walpb"
+	"go.uber.org/zap/zaptest"
 )
 
 var testSnap = &raftpb.Snapshot{
@@ -47,7 +46,7 @@ func TestSaveAndLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
-	ss := New(zap.NewExample(), dir)
+	ss := New(zaptest.NewLogger(t), dir)
 	err = ss.save(testSnap)
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +68,7 @@ func TestBadCRC(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
-	ss := New(zap.NewExample(), dir)
+	ss := New(zaptest.NewLogger(t), dir)
 	err = ss.save(testSnap)
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +78,7 @@ func TestBadCRC(t *testing.T) {
 	// fake a crc mismatch
 	crcTable = crc32.MakeTable(crc32.Koopman)
 
-	_, err = Read(zap.NewExample(), filepath.Join(dir, fmt.Sprintf("%016x-%016x.snap", 1, 1)))
+	_, err = Read(zaptest.NewLogger(t), filepath.Join(dir, fmt.Sprintf("%016x-%016x.snap", 1, 1)))
 	if err == nil || err != ErrCRCMismatch {
 		t.Errorf("err = %v, want %v", err, ErrCRCMismatch)
 	}
@@ -94,12 +93,12 @@ func TestFailback(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	large := fmt.Sprintf("%016x-%016x-%016x.snap", 0xFFFF, 0xFFFF, 0xFFFF)
-	err = ioutil.WriteFile(filepath.Join(dir, large), []byte("bad data"), 0666)
+	err = os.WriteFile(filepath.Join(dir, large), []byte("bad data"), 0666)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ss := New(zap.NewExample(), dir)
+	ss := New(zaptest.NewLogger(t), dir)
 	err = ss.save(testSnap)
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +133,7 @@ func TestSnapNames(t *testing.T) {
 			f.Close()
 		}
 	}
-	ss := New(zap.NewExample(), dir)
+	ss := New(zaptest.NewLogger(t), dir)
 	names, err := ss.snapNames()
 	if err != nil {
 		t.Errorf("err = %v, want nil", err)
@@ -155,7 +154,7 @@ func TestLoadNewestSnap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
-	ss := New(zap.NewExample(), dir)
+	ss := New(zaptest.NewLogger(t), dir)
 	err = ss.save(testSnap)
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +218,7 @@ func TestNoSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
-	ss := New(zap.NewExample(), dir)
+	ss := New(zaptest.NewLogger(t), dir)
 	_, err = ss.Load()
 	if err != ErrNoSnapshot {
 		t.Errorf("err = %v, want %v", err, ErrNoSnapshot)
@@ -234,12 +233,12 @@ func TestEmptySnapshot(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	err = ioutil.WriteFile(filepath.Join(dir, "1.snap"), []byte(""), 0x700)
+	err = os.WriteFile(filepath.Join(dir, "1.snap"), []byte(""), 0x700)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = Read(zap.NewExample(), filepath.Join(dir, "1.snap"))
+	_, err = Read(zaptest.NewLogger(t), filepath.Join(dir, "1.snap"))
 	if err != ErrEmptySnapshot {
 		t.Errorf("err = %v, want %v", err, ErrEmptySnapshot)
 	}
@@ -255,12 +254,12 @@ func TestAllSnapshotBroken(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	err = ioutil.WriteFile(filepath.Join(dir, "1.snap"), []byte("bad"), 0x700)
+	err = os.WriteFile(filepath.Join(dir, "1.snap"), []byte("bad"), 0x700)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ss := New(zap.NewExample(), dir)
+	ss := New(zaptest.NewLogger(t), dir)
 	_, err = ss.Load()
 	if err != ErrNoSnapshot {
 		t.Errorf("err = %v, want %v", err, ErrNoSnapshot)
@@ -278,12 +277,12 @@ func TestReleaseSnapDBs(t *testing.T) {
 	snapIndices := []uint64{100, 200, 300, 400}
 	for _, index := range snapIndices {
 		filename := filepath.Join(dir, fmt.Sprintf("%016x.snap.db", index))
-		if err := ioutil.WriteFile(filename, []byte("snap file\n"), 0644); err != nil {
+		if err := os.WriteFile(filename, []byte("snap file\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	ss := New(zap.NewExample(), dir)
+	ss := New(zaptest.NewLogger(t), dir)
 
 	if err := ss.ReleaseSnapDBs(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 300}}); err != nil {
 		t.Fatal(err)

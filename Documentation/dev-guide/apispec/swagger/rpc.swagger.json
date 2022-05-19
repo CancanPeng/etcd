@@ -2671,7 +2671,7 @@
           "format": "uint64"
         },
         "revision": {
-          "description": "revision is the key-value store revision when the request was applied.\nFor watch progress responses, the header.revision indicates progress. All future events\nrecieved in this stream are guaranteed to have a higher revision number than the\nheader.revision number.",
+          "description": "revision is the key-value store revision when the request was applied.\nFor watch progress responses, the header.revision indicates progress. All future events\nreceived in this stream are guaranteed to have a higher revision number than the\nheader.revision number.",
           "type": "string",
           "format": "int64"
         }
@@ -2713,6 +2713,10 @@
           "type": "string",
           "format": "uint64",
           "title": "remaining_bytes is the number of blob bytes to be sent after this message"
+        },
+        "version": {
+          "description": "local version of server that created the snapshot.\nIn cluster with binaries with different version, each cluster can return different result.\nInforms which etcd server version should be used when restoring the snapshot.",
+          "type": "string"
         }
       }
     },
@@ -2766,6 +2770,10 @@
           "description": "raftTerm is the current raft term of the responding member.",
           "type": "string",
           "format": "uint64"
+        },
+        "storageVersion": {
+          "description": "storageVersion is the version of the db file. It might be get updated with delay in relationship to the target cluster version.",
+          "type": "string"
         },
         "version": {
           "description": "version is the cluster protocol version used by the responding member.",

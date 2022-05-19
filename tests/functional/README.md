@@ -4,7 +4,7 @@
 
 See [`rpcpb.Case`](https://godoc.org/github.com/coreos/etcd/functional/rpcpb#Case) for all failure cases.
 
-See [functional.yaml](https://github.com/etcd-io/etcd/blob/master/tests/functional/functional.yaml) for an example configuration.
+See [functional.yaml](https://github.com/etcd-io/etcd/blob/main/tests/functional/functional.yaml) for an example configuration.
 
 ### Run locally
 
@@ -39,7 +39,7 @@ Proxy layer that simulates various network conditions.
 Test locally
 
 ```bash
-$ ./build.sh
+$ ./scripts/build.sh
 $ ./bin/etcd
 
 $ make build-functional
@@ -201,7 +201,7 @@ $ curl -L http://localhost:2378/blackhole-tx -X DELETE
 Trigger leader election
 
 ```bash
-$ ./build.sh
+$ ./scripts/build.sh
 $ make build-functional
 
 $ rm -rf /tmp/etcd-proxy-data.s*

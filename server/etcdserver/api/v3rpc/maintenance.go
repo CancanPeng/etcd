@@ -27,14 +27,16 @@ import (
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/server/v3/auth"
 	"go.etcd.io/etcd/server/v3/etcdserver"
-	"go.etcd.io/etcd/server/v3/mvcc"
-	"go.etcd.io/etcd/server/v3/mvcc/backend"
+	serverversion "go.etcd.io/etcd/server/v3/etcdserver/version"
+	"go.etcd.io/etcd/server/v3/storage/backend"
+	"go.etcd.io/etcd/server/v3/storage/mvcc"
+	"go.etcd.io/etcd/server/v3/storage/schema"
 
 	"go.uber.org/zap"
 )
 
 type KVGetter interface {
-	KV() mvcc.ConsistentWatchableKV
+	KV() mvcc.WatchableKV
 }
 
 type BackendGetter interface {
@@ -75,10 +77,11 @@ type maintenanceServer struct {
 	hdr header
 	cs  ClusterStatusGetter
 	d   Downgrader
+	vs  serverversion.Server
 }
 
 func NewMaintenanceServer(s *etcdserver.EtcdServer) pb.MaintenanceServer {
-	srv := &maintenanceServer{lg: s.Cfg.Logger, rg: s, kg: s, bg: s, a: s, lt: s, hdr: newHeader(s), cs: s, d: s}
+	srv := &maintenanceServer{lg: s.Cfg.Logger, rg: s, kg: s, bg: s, a: s, lt: s, hdr: newHeader(s), cs: s, d: s, vs: etcdserver.NewServerVersionAdapter(s)}
 	if srv.lg == nil {
 		srv.lg = zap.NewNop()
 	}
@@ -100,6 +103,11 @@ func (ms *maintenanceServer) Defragment(ctx context.Context, sr *pb.DefragmentRe
 const snapshotSendBufferSize = 32 * 1024
 
 func (ms *maintenanceServer) Snapshot(sr *pb.SnapshotRequest, srv pb.Maintenance_SnapshotServer) error {
+	ver := schema.ReadStorageVersion(ms.bg.Backend().ReadTx())
+	storageVersion := ""
+	if ver != nil {
+		storageVersion = ver.String()
+	}
 	snap := ms.bg.Backend().Snapshot()
 	pr, pw := io.Pipe()
 
@@ -125,6 +133,7 @@ func (ms *maintenanceServer) Snapshot(sr *pb.SnapshotRequest, srv pb.Maintenance
 	ms.lg.Info("sending database snapshot to client",
 		zap.Int64("total-bytes", total),
 		zap.String("size", size),
+		zap.String("storage-version", storageVersion),
 	)
 	for total-sent > 0 {
 		// buffer just holds read bytes from stream
@@ -151,6 +160,7 @@ func (ms *maintenanceServer) Snapshot(sr *pb.SnapshotRequest, srv pb.Maintenance
 		resp := &pb.SnapshotResponse{
 			RemainingBytes: uint64(total - sent),
 			Blob:           buf[:n],
+			Version:        storageVersion,
 		}
 		if err = srv.Send(resp); err != nil {
 			return togRPCError(err)
@@ -166,7 +176,7 @@ func (ms *maintenanceServer) Snapshot(sr *pb.SnapshotRequest, srv pb.Maintenance
 		zap.Int64("total-bytes", total),
 		zap.Int("checksum-size", len(sha)),
 	)
-	hresp := &pb.SnapshotResponse{RemainingBytes: 0, Blob: sha}
+	hresp := &pb.SnapshotResponse{RemainingBytes: 0, Blob: sha, Version: storageVersion}
 	if err := srv.Send(hresp); err != nil {
 		return togRPCError(err)
 	}
@@ -174,7 +184,8 @@ func (ms *maintenanceServer) Snapshot(sr *pb.SnapshotRequest, srv pb.Maintenance
 	ms.lg.Info("successfully sent database snapshot to client",
 		zap.Int64("total-bytes", total),
 		zap.String("size", size),
-		zap.String("took", humanize.Time(start)),
+		zap.Duration("took", time.Since(start)),
+		zap.String("storage-version", storageVersion),
 	)
 	return nil
 }
@@ -225,6 +236,9 @@ func (ms *maintenanceServer) Status(ctx context.Context, ar *pb.StatusRequest) (
 		DbSize:           ms.bg.Backend().Size(),
 		DbSizeInUse:      ms.bg.Backend().SizeInUse(),
 		IsLearner:        ms.cs.IsLearner(),
+	}
+	if storageVersion := ms.vs.GetStorageVersion(); storageVersion != nil {
+		resp.StorageVersion = storageVersion.String()
 	}
 	if resp.Leader == raft.None {
 		resp.Errors = append(resp.Errors, etcdserver.ErrNoLeader.Error())

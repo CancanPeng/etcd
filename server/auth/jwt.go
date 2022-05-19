@@ -21,7 +21,7 @@ import (
 	"errors"
 	"time"
 
-	jwt "github.com/form3tech-oss/jwt-go"
+	jwt "github.com/golang-jwt/jwt"
 	"go.uber.org/zap"
 )
 
@@ -62,7 +62,6 @@ func (t *tokenJWT) info(ctx context.Context, token string, rev uint64) (*AuthInf
 	if err != nil {
 		t.lg.Warn(
 			"failed to parse a JWT token",
-			zap.String("token", token),
 			zap.Error(err),
 		)
 		return nil, false
@@ -70,7 +69,7 @@ func (t *tokenJWT) info(ctx context.Context, token string, rev uint64) (*AuthInf
 
 	claims, ok := parsed.Claims.(jwt.MapClaims)
 	if !parsed.Valid || !ok {
-		t.lg.Warn("invalid JWT token", zap.String("token", token))
+		t.lg.Warn("failed to obtain claims from a JWT token")
 		return nil, false
 	}
 

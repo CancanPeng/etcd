@@ -15,17 +15,18 @@
 package embed
 
 import (
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"net/url"
 	"os"
 	"testing"
 	"time"
 
-	"go.etcd.io/etcd/pkg/v3/srv"
-	"go.etcd.io/etcd/pkg/v3/transport"
-	"go.etcd.io/etcd/pkg/v3/types"
+	"github.com/stretchr/testify/assert"
+	"go.etcd.io/etcd/client/pkg/v3/srv"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
+	"go.etcd.io/etcd/client/pkg/v3/types"
 
 	"sigs.k8s.io/yaml"
 )
@@ -39,12 +40,13 @@ func TestConfigFileOtherFields(t *testing.T) {
 	ctls := securityConfig{TrustedCAFile: "cca", CertFile: "ccert", KeyFile: "ckey"}
 	ptls := securityConfig{TrustedCAFile: "pca", CertFile: "pcert", KeyFile: "pkey"}
 	yc := struct {
-		ClientSecurityCfgFile securityConfig `json:"client-transport-security"`
-		PeerSecurityCfgFile   securityConfig `json:"peer-transport-security"`
-		ForceNewCluster       bool           `json:"force-new-cluster"`
-		Logger                string         `json:"logger"`
-		LogOutputs            []string       `json:"log-outputs"`
-		Debug                 bool           `json:"debug"`
+		ClientSecurityCfgFile securityConfig       `json:"client-transport-security"`
+		PeerSecurityCfgFile   securityConfig       `json:"peer-transport-security"`
+		ForceNewCluster       bool                 `json:"force-new-cluster"`
+		Logger                string               `json:"logger"`
+		LogOutputs            []string             `json:"log-outputs"`
+		Debug                 bool                 `json:"debug"`
+		SocketOpts            transport.SocketOpts `json:"socket-options"`
 	}{
 		ctls,
 		ptls,
@@ -52,6 +54,9 @@ func TestConfigFileOtherFields(t *testing.T) {
 		"zap",
 		[]string{"/dev/null"},
 		false,
+		transport.SocketOpts{
+			ReusePort: true,
+		},
 	}
 
 	b, err := yaml.Marshal(&yc)
@@ -67,16 +72,18 @@ func TestConfigFileOtherFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !cfg.ForceNewCluster {
-		t.Errorf("ForceNewCluster = %v, want %v", cfg.ForceNewCluster, true)
-	}
-
 	if !ctls.equals(&cfg.ClientTLSInfo) {
 		t.Errorf("ClientTLS = %v, want %v", cfg.ClientTLSInfo, ctls)
 	}
 	if !ptls.equals(&cfg.PeerTLSInfo) {
 		t.Errorf("PeerTLS = %v, want %v", cfg.PeerTLSInfo, ptls)
 	}
+
+	assert.Equal(t, true, cfg.ForceNewCluster, "ForceNewCluster does not match")
+
+	assert.Equal(t, true, cfg.SocketOpts.ReusePort, "ReusePort does not match")
+
+	assert.Equal(t, false, cfg.SocketOpts.ReuseAddress, "ReuseAddress does not match")
 }
 
 // TestUpdateDefaultClusterFromName ensures that etcd can start with 'etcd --name=abc'.
@@ -150,7 +157,7 @@ func (s *securityConfig) equals(t *transport.TLSInfo) bool {
 }
 
 func mustCreateCfgFile(t *testing.T, b []byte) *os.File {
-	tmpfile, err := ioutil.TempFile("", "servercfg")
+	tmpfile, err := os.CreateTemp("", "servercfg")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,5 +294,137 @@ func TestPeerURLsMapAndTokenFromSRV(t *testing.T) {
 		if hasErr(err) != tt.werr {
 			t.Errorf("#%d: err = %v, want = %v", i, err, tt.werr)
 		}
+	}
+}
+
+func TestLeaseCheckpointValidate(t *testing.T) {
+	tcs := []struct {
+		name        string
+		configFunc  func() Config
+		expectError bool
+	}{
+		{
+			name: "Default config should pass",
+			configFunc: func() Config {
+				return *NewConfig()
+			},
+		},
+		{
+			name: "Enabling checkpoint leases should pass",
+			configFunc: func() Config {
+				cfg := *NewConfig()
+				cfg.ExperimentalEnableLeaseCheckpoint = true
+				return cfg
+			},
+		},
+		{
+			name: "Enabling checkpoint leases and persist should pass",
+			configFunc: func() Config {
+				cfg := *NewConfig()
+				cfg.ExperimentalEnableLeaseCheckpoint = true
+				cfg.ExperimentalEnableLeaseCheckpointPersist = true
+				return cfg
+			},
+		},
+		{
+			name: "Enabling checkpoint leases persist without checkpointing itself should fail",
+			configFunc: func() Config {
+				cfg := *NewConfig()
+				cfg.ExperimentalEnableLeaseCheckpointPersist = true
+				return cfg
+			},
+			expectError: true,
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.configFunc()
+			err := cfg.Validate()
+			if (err != nil) != tc.expectError {
+				t.Errorf("config.Validate() = %q, expected error: %v", err, tc.expectError)
+			}
+		})
+	}
+}
+
+func TestLogRotation(t *testing.T) {
+	tests := []struct {
+		name              string
+		logOutputs        []string
+		logRotationConfig string
+		wantErr           bool
+		wantErrMsg        error
+	}{
+		{
+			name:              "mixed log output targets",
+			logOutputs:        []string{"stderr", "/tmp/path"},
+			logRotationConfig: `{"maxsize": 1}`,
+		},
+		{
+			name:              "log output relative path",
+			logOutputs:        []string{"stderr", "tmp/path"},
+			logRotationConfig: `{"maxsize": 1}`,
+		},
+		{
+			name:              "no file targets",
+			logOutputs:        []string{"stderr"},
+			logRotationConfig: `{"maxsize": 1}`,
+			wantErr:           true,
+			wantErrMsg:        ErrLogRotationInvalidLogOutput,
+		},
+		{
+			name:              "multiple file targets",
+			logOutputs:        []string{"/tmp/path1", "/tmp/path2"},
+			logRotationConfig: DefaultLogRotationConfig,
+			wantErr:           true,
+			wantErrMsg:        ErrLogRotationInvalidLogOutput,
+		},
+		{
+			name:              "default output",
+			logRotationConfig: `{"maxsize": 1}`,
+			wantErr:           true,
+			wantErrMsg:        ErrLogRotationInvalidLogOutput,
+		},
+		{
+			name:              "default log rotation config",
+			logOutputs:        []string{"/tmp/path"},
+			logRotationConfig: DefaultLogRotationConfig,
+		},
+		{
+			name:              "invalid logger config",
+			logOutputs:        []string{"/tmp/path"},
+			logRotationConfig: `{"maxsize": true}`,
+			wantErr:           true,
+			wantErrMsg:        errors.New("invalid log rotation config: json: cannot unmarshal bool into Go struct field logRotationConfig.maxsize of type int"),
+		},
+		{
+			name:              "improperly formatted logger config",
+			logOutputs:        []string{"/tmp/path"},
+			logRotationConfig: `{"maxsize": true`,
+			wantErr:           true,
+			wantErrMsg:        errors.New("improperly formatted log rotation config: unexpected end of JSON input"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewConfig()
+			cfg.Logger = "zap"
+			cfg.LogOutputs = tt.logOutputs
+			cfg.EnableLogRotation = true
+			cfg.LogRotationConfigJSON = tt.logRotationConfig
+			err := cfg.Validate()
+			if err != nil && !tt.wantErr {
+				t.Errorf("test %q, unexpected error %v", tt.name, err)
+			}
+			if err != nil && tt.wantErr && tt.wantErrMsg.Error() != err.Error() {
+				t.Errorf("test %q, expected error: %+v, got: %+v", tt.name, tt.wantErrMsg, err)
+			}
+			if err == nil && tt.wantErr {
+				t.Errorf("test %q, expected error, got nil", tt.name)
+			}
+			if err == nil {
+				cfg.GetLogger().Info("test log")
+			}
+		})
 	}
 }

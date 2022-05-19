@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build tools
 // +build tools
 
 // This file implements that pattern:
@@ -24,6 +25,7 @@ import (
 	_ "github.com/alexkohler/nakedret"
 	_ "github.com/chzchzchz/goword"
 	_ "github.com/coreos/license-bill-of-materials"
+	_ "github.com/google/addlicense"
 	_ "github.com/gordonklaus/ineffassign"
 	_ "github.com/grpc-ecosystem/grpc-gateway/protoc-gen-grpc-gateway"
 	_ "github.com/grpc-ecosystem/grpc-gateway/protoc-gen-swagger"
@@ -31,8 +33,10 @@ import (
 	_ "github.com/hexfusion/schwag"
 	_ "github.com/mdempsky/unconvert"
 	_ "github.com/mgechev/revive"
+	_ "github.com/mikefarah/yq/v4"
 	_ "go.etcd.io/protodoc"
+	_ "gotest.tools/v3"
+	_ "gotest.tools/gotestsum"
 	_ "honnef.co/go/tools/cmd/staticcheck"
 	_ "mvdan.cc/unparam"
-	_ "github.com/mikefarah/yq/v3"
 )

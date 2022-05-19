@@ -16,7 +16,7 @@ package tcpproxy
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -57,7 +57,7 @@ func TestUserspaceProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, gerr := ioutil.ReadAll(res.Body)
+	got, gerr := io.ReadAll(res.Body)
 	res.Body.Close()
 	if gerr != nil {
 		t.Fatal(gerr)
@@ -118,7 +118,7 @@ func TestUserspaceProxyPriority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, gerr := ioutil.ReadAll(res.Body)
+	got, gerr := io.ReadAll(res.Body)
 	res.Body.Close()
 	if gerr != nil {
 		t.Fatal(gerr)
@@ -127,5 +127,36 @@ func TestUserspaceProxyPriority(t *testing.T) {
 	want := "hello proxy 1"
 	if string(got) != want {
 		t.Errorf("got = %s, want %s", got, want)
+	}
+}
+
+func TestFormatAddr(t *testing.T) {
+	addrs := []struct {
+		host         string
+		port         uint16
+		expectedAddr string
+	}{
+		{
+			"192.168.1.10",
+			2379,
+			"192.168.1.10:2379",
+		},
+		{
+			"::1",
+			2379,
+			"[::1]:2379",
+		},
+		{
+			"2001:db8::ff00:42:8329",
+			80,
+			"[2001:db8::ff00:42:8329]:80",
+		},
+	}
+
+	for _, addr := range addrs {
+		actualAddr := formatAddr(addr.host, addr.port)
+		if actualAddr != addr.expectedAddr {
+			t.Errorf("actualAddr: %s, expectedAddr: %s", actualAddr, addr.expectedAddr)
+		}
 	}
 }

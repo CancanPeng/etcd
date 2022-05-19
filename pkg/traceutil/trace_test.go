@@ -18,13 +18,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
+	"go.etcd.io/etcd/client/pkg/v3/logutil"
 )
 
 func TestGet(t *testing.T) {
@@ -205,7 +204,7 @@ func TestLog(t *testing.T) {
 			logPath := filepath.Join(os.TempDir(), fmt.Sprintf("test-log-%d", time.Now().UnixNano()))
 			defer os.RemoveAll(logPath)
 
-			lcfg := zap.NewProductionConfig()
+			lcfg := logutil.DefaultZapLoggerConfig
 			lcfg.OutputPaths = []string{logPath}
 			lcfg.ErrorOutputPaths = []string{logPath}
 			lg, _ := lcfg.Build()
@@ -215,7 +214,7 @@ func TestLog(t *testing.T) {
 			}
 			tt.trace.lg = lg
 			tt.trace.Log()
-			data, err := ioutil.ReadFile(logPath)
+			data, err := os.ReadFile(logPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -286,14 +285,14 @@ func TestLogIfLong(t *testing.T) {
 			logPath := filepath.Join(os.TempDir(), fmt.Sprintf("test-log-%d", time.Now().UnixNano()))
 			defer os.RemoveAll(logPath)
 
-			lcfg := zap.NewProductionConfig()
+			lcfg := logutil.DefaultZapLoggerConfig
 			lcfg.OutputPaths = []string{logPath}
 			lcfg.ErrorOutputPaths = []string{logPath}
 			lg, _ := lcfg.Build()
 
 			tt.trace.lg = lg
 			tt.trace.LogIfLong(tt.threshold)
-			data, err := ioutil.ReadFile(logPath)
+			data, err := os.ReadFile(logPath)
 			if err != nil {
 				t.Fatal(err)
 			}

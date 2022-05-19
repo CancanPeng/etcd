@@ -15,27 +15,18 @@
 package etcdmain
 
 import (
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"net/http"
 	"os"
-	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
-	"time"
 
-	"go.etcd.io/etcd/pkg/v3/fileutil"
-	pkgioutil "go.etcd.io/etcd/pkg/v3/ioutil"
+	"go.etcd.io/etcd/client/pkg/v3/fileutil"
+	"go.etcd.io/etcd/client/pkg/v3/logutil"
+	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/pkg/v3/osutil"
-	"go.etcd.io/etcd/pkg/v3/transport"
-	"go.etcd.io/etcd/pkg/v3/types"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.etcd.io/etcd/server/v3/etcdserver"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v2discovery"
-	"go.etcd.io/etcd/server/v3/proxy/httpproxy"
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -57,10 +48,13 @@ func startEtcdOrProxyV2(args []string) {
 
 	err := cfg.parse(args[1:])
 	lg := cfg.ec.GetLogger()
+	// If we failed to parse the whole configuration, print the error using
+	// preferably the resolved logger from the config,
+	// but if does not exists, create a new temporary logger.
 	if lg == nil {
 		var zapError error
 		// use this logger
-		lg, zapError = zap.NewProduction()
+		lg, zapError = logutil.CreateDefaultZapLogger(zap.InfoLevel)
 		if zapError != nil {
 			fmt.Printf("error creating zap logger %v", zapError)
 			os.Exit(1)
@@ -75,6 +69,8 @@ func startEtcdOrProxyV2(args []string) {
 		}
 		os.Exit(1)
 	}
+
+	cfg.ec.SetupGlobalLoggers()
 
 	defer func() {
 		logger := cfg.ec.GetLogger()
@@ -108,7 +104,7 @@ func startEtcdOrProxyV2(args []string) {
 	which := identifyDataDirOrDie(cfg.ec.GetLogger(), cfg.ec.Dir)
 	if which != dirEmpty {
 		lg.Info(
-			"server has been already initialized",
+			"server has already been initialized",
 			zap.String("data-dir", cfg.ec.Dir),
 			zap.String("dir-type", string(which)),
 		)
@@ -116,7 +112,7 @@ func startEtcdOrProxyV2(args []string) {
 		case dirMember:
 			stopped, errc, err = startEtcd(&cfg.ec)
 		case dirProxy:
-			err = startProxy(cfg)
+			lg.Panic("v2 http proxy has already been deprecated in 3.6", zap.String("dir-type", string(which)))
 		default:
 			lg.Panic(
 				"unknown directory type",
@@ -124,24 +120,9 @@ func startEtcdOrProxyV2(args []string) {
 			)
 		}
 	} else {
-		shouldProxy := cfg.isProxy()
-		if !shouldProxy {
-			stopped, errc, err = startEtcd(&cfg.ec)
-			if derr, ok := err.(*etcdserver.DiscoveryError); ok && derr.Err == v2discovery.ErrFullCluster {
-				if cfg.shouldFallbackToProxy() {
-					lg.Warn(
-						"discovery cluster is full, falling back to proxy",
-						zap.String("fallback-proxy", fallbackFlagProxy),
-						zap.Error(err),
-					)
-					shouldProxy = true
-				}
-			} else if err != nil {
-				lg.Warn("failed to start etcd", zap.Error(err))
-			}
-		}
-		if shouldProxy {
-			err = startProxy(cfg)
+		stopped, errc, err = startEtcd(&cfg.ec)
+		if err != nil {
+			lg.Warn("failed to start etcd", zap.Error(err))
 		}
 	}
 
@@ -190,8 +171,8 @@ func startEtcdOrProxyV2(args []string) {
 			if types.URLs(cfg.ec.APUrls).String() == embed.DefaultInitialAdvertisePeerURLs {
 				lg.Warn("forgot to set --initial-advertise-peer-urls?")
 			}
-			if cfg.ec.InitialCluster == cfg.ec.InitialClusterFromName(cfg.ec.Name) && len(cfg.ec.Durl) == 0 {
-				lg.Warn("--discovery flag is not set")
+			if cfg.ec.InitialCluster == cfg.ec.InitialClusterFromName(cfg.ec.Name) && len(cfg.ec.Durl) == 0 && len(cfg.ec.DiscoveryCfg.Endpoints) == 0 {
+				lg.Warn("V2 discovery settings (i.e., --discovery) or v3 discovery settings (i.e., --discovery-token, --discovery-endpoints) are not set")
 			}
 			os.Exit(1)
 		}
@@ -229,193 +210,6 @@ func startEtcd(cfg *embed.Config) (<-chan struct{}, <-chan error, error) {
 	case <-e.Server.StopNotify(): // publish aborted from 'ErrStopped'
 	}
 	return e.Server.StopNotify(), e.Err(), nil
-}
-
-// startProxy launches an HTTP proxy for client communication which proxies to other etcd nodes.
-func startProxy(cfg *config) error {
-	lg := cfg.ec.GetLogger()
-	lg.Info("v2 API proxy starting")
-
-	clientTLSInfo := cfg.ec.ClientTLSInfo
-	if clientTLSInfo.Empty() {
-		// Support old proxy behavior of defaulting to PeerTLSInfo
-		// for both client and peer connections.
-		clientTLSInfo = cfg.ec.PeerTLSInfo
-	}
-	clientTLSInfo.InsecureSkipVerify = cfg.ec.ClientAutoTLS
-	cfg.ec.PeerTLSInfo.InsecureSkipVerify = cfg.ec.PeerAutoTLS
-
-	pt, err := transport.NewTimeoutTransport(
-		clientTLSInfo,
-		time.Duration(cfg.cp.ProxyDialTimeoutMs)*time.Millisecond,
-		time.Duration(cfg.cp.ProxyReadTimeoutMs)*time.Millisecond,
-		time.Duration(cfg.cp.ProxyWriteTimeoutMs)*time.Millisecond,
-	)
-	if err != nil {
-		return err
-	}
-	pt.MaxIdleConnsPerHost = httpproxy.DefaultMaxIdleConnsPerHost
-
-	if err = cfg.ec.PeerSelfCert(); err != nil {
-		lg.Fatal("failed to get self-signed certs for peer", zap.Error(err))
-	}
-	tr, err := transport.NewTimeoutTransport(
-		cfg.ec.PeerTLSInfo,
-		time.Duration(cfg.cp.ProxyDialTimeoutMs)*time.Millisecond,
-		time.Duration(cfg.cp.ProxyReadTimeoutMs)*time.Millisecond,
-		time.Duration(cfg.cp.ProxyWriteTimeoutMs)*time.Millisecond,
-	)
-	if err != nil {
-		return err
-	}
-
-	cfg.ec.Dir = filepath.Join(cfg.ec.Dir, "proxy")
-	err = fileutil.TouchDirAll(cfg.ec.Dir)
-	if err != nil {
-		return err
-	}
-
-	var peerURLs []string
-	clusterfile := filepath.Join(cfg.ec.Dir, "cluster")
-
-	b, err := ioutil.ReadFile(clusterfile)
-	switch {
-	case err == nil:
-		if cfg.ec.Durl != "" {
-			lg.Warn(
-				"discovery token ignored since the proxy has already been initialized; valid cluster file found",
-				zap.String("cluster-file", clusterfile),
-			)
-		}
-		if cfg.ec.DNSCluster != "" {
-			lg.Warn(
-				"DNS SRV discovery ignored since the proxy has already been initialized; valid cluster file found",
-				zap.String("cluster-file", clusterfile),
-			)
-		}
-		urls := struct{ PeerURLs []string }{}
-		err = json.Unmarshal(b, &urls)
-		if err != nil {
-			return err
-		}
-		peerURLs = urls.PeerURLs
-		lg.Info(
-			"proxy using peer URLS from cluster file",
-			zap.Strings("peer-urls", peerURLs),
-			zap.String("cluster-file", clusterfile),
-		)
-
-	case os.IsNotExist(err):
-		var urlsmap types.URLsMap
-		urlsmap, _, err = cfg.ec.PeerURLsMapAndToken("proxy")
-		if err != nil {
-			return fmt.Errorf("error setting up initial cluster: %v", err)
-		}
-
-		if cfg.ec.Durl != "" {
-			var s string
-			s, err = v2discovery.GetCluster(lg, cfg.ec.Durl, cfg.ec.Dproxy)
-			if err != nil {
-				return err
-			}
-			if urlsmap, err = types.NewURLsMap(s); err != nil {
-				return err
-			}
-		}
-		peerURLs = urlsmap.URLs()
-		lg.Info("proxy using peer URLS", zap.Strings("peer-urls", peerURLs))
-
-	default:
-		return err
-	}
-
-	clientURLs := []string{}
-	uf := func() []string {
-		gcls, gerr := etcdserver.GetClusterFromRemotePeers(lg, peerURLs, tr)
-		if gerr != nil {
-			lg.Warn(
-				"failed to get cluster from remote peers",
-				zap.Strings("peer-urls", peerURLs),
-				zap.Error(gerr),
-			)
-			return []string{}
-		}
-
-		clientURLs = gcls.ClientURLs()
-		urls := struct{ PeerURLs []string }{gcls.PeerURLs()}
-		b, jerr := json.Marshal(urls)
-		if jerr != nil {
-			lg.Warn("proxy failed to marshal peer URLs", zap.Error(jerr))
-			return clientURLs
-		}
-
-		err = pkgioutil.WriteAndSyncFile(clusterfile+".bak", b, 0600)
-		if err != nil {
-			lg.Warn("proxy failed to write cluster file", zap.Error(err))
-			return clientURLs
-		}
-		err = os.Rename(clusterfile+".bak", clusterfile)
-		if err != nil {
-			lg.Warn(
-				"proxy failed to rename cluster file",
-				zap.String("path", clusterfile),
-				zap.Error(err),
-			)
-			return clientURLs
-		}
-		if !reflect.DeepEqual(gcls.PeerURLs(), peerURLs) {
-			lg.Info(
-				"proxy updated peer URLs",
-				zap.Strings("from", peerURLs),
-				zap.Strings("to", gcls.PeerURLs()),
-			)
-		}
-		peerURLs = gcls.PeerURLs()
-
-		return clientURLs
-	}
-	ph := httpproxy.NewHandler(lg, pt, uf, time.Duration(cfg.cp.ProxyFailureWaitMs)*time.Millisecond, time.Duration(cfg.cp.ProxyRefreshIntervalMs)*time.Millisecond)
-	ph = embed.WrapCORS(cfg.ec.CORS, ph)
-
-	if cfg.isReadonlyProxy() {
-		ph = httpproxy.NewReadonlyHandler(ph)
-	}
-
-	// setup self signed certs when serving https
-	cHosts, cTLS := []string{}, false
-	for _, u := range cfg.ec.LCUrls {
-		cHosts = append(cHosts, u.Host)
-		cTLS = cTLS || u.Scheme == "https"
-	}
-	for _, u := range cfg.ec.ACUrls {
-		cHosts = append(cHosts, u.Host)
-		cTLS = cTLS || u.Scheme == "https"
-	}
-	listenerTLS := cfg.ec.ClientTLSInfo
-	if cfg.ec.ClientAutoTLS && cTLS {
-		listenerTLS, err = transport.SelfCert(cfg.ec.GetLogger(), filepath.Join(cfg.ec.Dir, "clientCerts"), cHosts, cfg.ec.SelfSignedCertValidity)
-		if err != nil {
-			lg.Fatal("failed to initialize self-signed client cert", zap.Error(err))
-		}
-	}
-
-	// Start a proxy server goroutine for each listen address
-	for _, u := range cfg.ec.LCUrls {
-		l, err := transport.NewListener(u.Host, u.Scheme, &listenerTLS)
-		if err != nil {
-			return err
-		}
-
-		host := u.String()
-		go func() {
-			lg.Info("v2 proxy started listening on client requests", zap.String("host", host))
-			mux := http.NewServeMux()
-			etcdhttp.HandlePrometheus(mux) // v2 proxy just uses the same port
-			mux.Handle("/", ph)
-			lg.Fatal("done serving", zap.Error(http.Serve(l, mux)))
-		}()
-	}
-	return nil
 }
 
 // identifyDataDirOrDie returns the type of the data dir.
@@ -458,18 +252,25 @@ func identifyDataDirOrDie(lg *zap.Logger, dir string) dirType {
 }
 
 func checkSupportArch() {
-	// TODO qualify arm64
-	if runtime.GOARCH == "amd64" || runtime.GOARCH == "ppc64le" || runtime.GOARCH == "s390x" {
+	lg, err := logutil.CreateDefaultZapLogger(zap.InfoLevel)
+	if err != nil {
+		panic(err)
+	}
+	// to add a new platform, check https://github.com/etcd-io/website/blob/main/content/en/docs/next/op-guide/supported-platform.md
+	if runtime.GOARCH == "amd64" ||
+		runtime.GOARCH == "arm64" ||
+		runtime.GOARCH == "ppc64le" ||
+		runtime.GOARCH == "s390x" {
 		return
 	}
 	// unsupported arch only configured via environment variable
 	// so unset here to not parse through flag
 	defer os.Unsetenv("ETCD_UNSUPPORTED_ARCH")
 	if env, ok := os.LookupEnv("ETCD_UNSUPPORTED_ARCH"); ok && env == runtime.GOARCH {
-		fmt.Printf("running etcd on unsupported architecture %q since ETCD_UNSUPPORTED_ARCH is set\n", env)
+		lg.Info("running etcd on unsupported architecture since ETCD_UNSUPPORTED_ARCH is set", zap.String("arch", env))
 		return
 	}
 
-	fmt.Printf("etcd on unsupported platform without ETCD_UNSUPPORTED_ARCH=%s set\n", runtime.GOARCH)
+	lg.Error("running etcd on unsupported architecture since ETCD_UNSUPPORTED_ARCH is set", zap.String("arch", runtime.GOARCH))
 	os.Exit(1)
 }

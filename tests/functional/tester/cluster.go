@@ -19,18 +19,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/pkg/v3/debugutil"
-	"go.etcd.io/etcd/pkg/v3/fileutil"
 	"go.etcd.io/etcd/tests/v3/functional/rpcpb"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -70,7 +70,7 @@ var dialOpts = []grpc.DialOption{
 	grpc.WithBlock(),
 }
 
-// NewCluster creates a client from a tester configuration.
+// NewCluster creates a cluster from a tester configuration.
 func NewCluster(lg *zap.Logger, fpath string) (*Cluster, error) {
 	clus, err := read(lg, fpath)
 	if err != nil {
@@ -83,21 +83,24 @@ func NewCluster(lg *zap.Logger, fpath string) (*Cluster, error) {
 	clus.agentRequests = make([]*rpcpb.Request, len(clus.Members))
 	clus.cases = make([]Case, 0)
 
+	lg.Info("creating members")
 	for i, ap := range clus.Members {
 		var err error
 		clus.agentConns[i], err = grpc.Dial(ap.AgentAddr, dialOpts...)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("cannot dial agent %v: %v", ap.AgentAddr, err)
 		}
 		clus.agentClients[i] = rpcpb.NewTransportClient(clus.agentConns[i])
-		clus.lg.Info("connected", zap.String("agent-address", ap.AgentAddr))
+		lg.Info("connected", zap.String("agent-address", ap.AgentAddr))
 
 		clus.agentStreams[i], err = clus.agentClients[i].Transport(context.Background())
 		if err != nil {
 			return nil, err
 		}
-		clus.lg.Info("created stream", zap.String("agent-address", ap.AgentAddr))
+		lg.Info("created stream", zap.String("agent-address", ap.AgentAddr))
 	}
+
+	lg.Info("agents configured.")
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
@@ -109,11 +112,10 @@ func NewCluster(lg *zap.Logger, fpath string) (*Cluster, error) {
 	clus.testerHTTPServer = &http.Server{
 		Addr:     clus.Tester.Addr,
 		Handler:  mux,
-		ErrorLog: log.New(ioutil.Discard, "net/http", 0),
+		ErrorLog: log.New(io.Discard, "net/http", 0),
 	}
 	go clus.serveTesterServer()
-
-	clus.updateCases()
+	lg.Info("tester server started")
 
 	clus.rateLimiter = rate.NewLimiter(
 		rate.Limit(int(clus.Tester.StressQPS)),
@@ -261,6 +263,13 @@ func (clus *Cluster) updateCases() {
 			}
 			clus.cases = append(clus.cases,
 				fpFailures...)
+		case "FAILPOINTS_WITH_DISK_IO_LATENCY":
+			fpFailures, fperr := failpointDiskIOFailures(clus)
+			if len(fpFailures) == 0 {
+				clus.lg.Info("no failpoints found!", zap.Error(fperr))
+			}
+			clus.cases = append(clus.cases,
+				fpFailures...)
 		}
 	}
 }
@@ -322,6 +331,11 @@ func (clus *Cluster) setStresserChecker() {
 
 		case "NO_CHECK":
 			clus.checkers = append(clus.checkers, newNoChecker())
+
+		case "SHORT_TTL_LEASE_EXPIRE":
+			for _, ls := range lss {
+				clus.checkers = append(clus.checkers, newShortTTLLeaseExpireChecker(ls))
+			}
 		}
 	}
 	clus.lg.Info("updated stressers")
@@ -510,7 +524,7 @@ func (clus *Cluster) sendOpWithResp(idx int, op rpcpb.Operation) (*rpcpb.Respons
 			"fixtures",
 			"client",
 		)
-		if err = fileutil.TouchDirAll(dirClient); err != nil {
+		if err = fileutil.TouchDirAll(clus.lg, dirClient); err != nil {
 			return nil, err
 		}
 
@@ -519,7 +533,7 @@ func (clus *Cluster) sendOpWithResp(idx int, op rpcpb.Operation) (*rpcpb.Respons
 			return nil, fmt.Errorf("got empty client cert from %q", m.EtcdClientEndpoint)
 		}
 		clientCertPath := filepath.Join(dirClient, "cert.pem")
-		if err = ioutil.WriteFile(clientCertPath, clientCertData, 0644); err != nil { // overwrite if exists
+		if err = os.WriteFile(clientCertPath, clientCertData, 0644); err != nil { // overwrite if exists
 			return nil, err
 		}
 		resp.Member.ClientCertPath = clientCertPath
@@ -533,7 +547,7 @@ func (clus *Cluster) sendOpWithResp(idx int, op rpcpb.Operation) (*rpcpb.Respons
 			return nil, fmt.Errorf("got empty client key from %q", m.EtcdClientEndpoint)
 		}
 		clientKeyPath := filepath.Join(dirClient, "key.pem")
-		if err = ioutil.WriteFile(clientKeyPath, clientKeyData, 0644); err != nil { // overwrite if exists
+		if err = os.WriteFile(clientKeyPath, clientKeyData, 0644); err != nil { // overwrite if exists
 			return nil, err
 		}
 		resp.Member.ClientKeyPath = clientKeyPath
@@ -546,7 +560,7 @@ func (clus *Cluster) sendOpWithResp(idx int, op rpcpb.Operation) (*rpcpb.Respons
 		if len(clientTrustedCAData) != 0 {
 			// TODO: disable this when auto TLS is deprecated
 			clientTrustedCAPath := filepath.Join(dirClient, "ca.pem")
-			if err = ioutil.WriteFile(clientTrustedCAPath, clientTrustedCAData, 0644); err != nil { // overwrite if exists
+			if err = os.WriteFile(clientTrustedCAPath, clientTrustedCAData, 0644); err != nil { // overwrite if exists
 				return nil, err
 			}
 			resp.Member.ClientTrustedCAPath = clientTrustedCAPath
@@ -689,7 +703,7 @@ func (clus *Cluster) compactKV(rev int64, timeout time.Duration) (err error) {
 					"compact error is ignored",
 					zap.String("endpoint", m.EtcdClientEndpoint),
 					zap.Int64("compact-revision", rev),
-					zap.Error(cerr),
+					zap.String("expected-error-msg", cerr.Error()),
 				)
 			} else {
 				clus.lg.Warn(

@@ -17,15 +17,13 @@ package e2e
 import (
 	"fmt"
 	"testing"
+
+	"go.etcd.io/etcd/tests/v3/framework/e2e"
 )
 
-func TestCtlV3RoleAdd(t *testing.T)          { testCtl(t, roleAddTest) }
-func TestCtlV3RoleAddNoTLS(t *testing.T)     { testCtl(t, roleAddTest, withCfg(*newConfigNoTLS())) }
-func TestCtlV3RoleAddClientTLS(t *testing.T) { testCtl(t, roleAddTest, withCfg(*newConfigClientTLS())) }
-func TestCtlV3RoleAddPeerTLS(t *testing.T)   { testCtl(t, roleAddTest, withCfg(*newConfigPeerTLS())) }
-func TestCtlV3RoleAddTimeout(t *testing.T)   { testCtl(t, roleAddTest, withDialTimeout(0)) }
-
-func TestCtlV3RoleGrant(t *testing.T) { testCtl(t, roleGrantTest) }
+// TestCtlV3RoleAddTimeout tests add role with 0 grpc dial timeout while it tolerates dial timeout error.
+// This is unique in e2e test
+func TestCtlV3RoleAddTimeout(t *testing.T) { testCtl(t, roleAddTest, withDialTimeout(0)) }
 
 func roleAddTest(cx ctlCtx) {
 	cmdSet := []struct {
@@ -53,50 +51,11 @@ func roleAddTest(cx ctlCtx) {
 	}
 }
 
-func roleGrantTest(cx ctlCtx) {
-	cmdSet := []struct {
-		args        []string
-		expectedStr string
-	}{
-		// Add a role.
-		{
-			args:        []string{"add", "root"},
-			expectedStr: "Role root created",
-		},
-		// Grant read permission to the role.
-		{
-			args:        []string{"grant", "root", "read", "foo"},
-			expectedStr: "Role root updated",
-		},
-		// Grant write permission to the role.
-		{
-			args:        []string{"grant", "root", "write", "foo"},
-			expectedStr: "Role root updated",
-		},
-		// Grant rw permission to the role.
-		{
-			args:        []string{"grant", "root", "readwrite", "foo"},
-			expectedStr: "Role root updated",
-		},
-		// Try granting invalid permission to the role.
-		{
-			args:        []string{"grant", "root", "123", "foo"},
-			expectedStr: "invalid permission type",
-		},
-	}
-
-	for i, cmd := range cmdSet {
-		if err := ctlV3Role(cx, cmd.args, cmd.expectedStr); err != nil {
-			cx.t.Fatalf("roleGrantTest #%d: ctlV3Role error (%v)", i, err)
-		}
-	}
-}
-
 func ctlV3Role(cx ctlCtx, args []string, expStr string) error {
 	cmdArgs := append(cx.PrefixArgs(), "role")
 	cmdArgs = append(cmdArgs, args...)
 
-	return spawnWithExpect(cmdArgs, expStr)
+	return e2e.SpawnWithExpectWithEnv(cmdArgs, cx.envMap, expStr)
 }
 
 func ctlV3RoleGrantPermission(cx ctlCtx, rolename string, perm grantingPerm) error {
@@ -110,7 +69,7 @@ func ctlV3RoleGrantPermission(cx ctlCtx, rolename string, perm grantingPerm) err
 	cmdArgs = append(cmdArgs, rolename)
 	cmdArgs = append(cmdArgs, grantingPermToArgs(perm)...)
 
-	proc, err := spawnCmd(cmdArgs)
+	proc, err := e2e.SpawnCmd(cmdArgs, cx.envMap)
 	if err != nil {
 		return err
 	}
@@ -136,7 +95,7 @@ func ctlV3RoleRevokePermission(cx ctlCtx, rolename string, key, rangeEnd string,
 		expStr = fmt.Sprintf("Permission of key %s is revoked from role %s", key, rolename)
 	}
 
-	proc, err := spawnCmd(cmdArgs)
+	proc, err := e2e.SpawnCmd(cmdArgs, cx.envMap)
 	if err != nil {
 		return err
 	}

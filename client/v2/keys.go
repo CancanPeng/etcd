@@ -19,12 +19,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go.etcd.io/etcd/pkg/v3/pathutil"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.etcd.io/etcd/client/pkg/v3/pathutil"
+	kjson "sigs.k8s.io/json"
 )
 
 const (
@@ -652,11 +654,9 @@ func unmarshalHTTPResponse(code int, header http.Header, body []byte) (res *Resp
 	return res, err
 }
 
-var jsonIterator = caseSensitiveJsonIterator()
-
 func unmarshalSuccessfulKeysResponse(header http.Header, body []byte) (*Response, error) {
 	var res Response
-	err := jsonIterator.Unmarshal(body, &res)
+	err := kjson.UnmarshalCaseSensitivePreserveInts(body, &res)
 	if err != nil {
 		return nil, ErrInvalidJSON
 	}

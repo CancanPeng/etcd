@@ -26,7 +26,7 @@ import (
 var (
 	// MinClusterVersion is the min cluster version this etcd binary is compatible with.
 	MinClusterVersion = "3.0.0"
-	Version           = "3.5.0-alpha.0"
+	Version           = "3.6.0-alpha.0"
 	APIVersion        = "unknown"
 
 	// Git SHA Value will be set during build
@@ -43,6 +43,7 @@ func init() {
 type Versions struct {
 	Server  string `json:"etcdserver"`
 	Cluster string `json:"etcdcluster"`
+	Storage string `json:"storage"`
 	// TODO: raft state machine version
 }
 

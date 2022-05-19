@@ -19,13 +19,13 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 
-	"go.etcd.io/etcd/pkg/v3/fileutil"
+	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 )
 
 const downloadURL = `https://storage.googleapis.com/etcd/%s/etcd-%s-darwin-amd64.zip`
@@ -39,13 +39,13 @@ func install(ver, dir string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	d, err := ioutil.ReadAll(resp.Body)
+	d, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
 
 	zipPath := filepath.Join(dir, "etcd.zip")
-	if err = ioutil.WriteFile(zipPath, d, fileutil.PrivateFileMode); err != nil {
+	if err = os.WriteFile(zipPath, d, fileutil.PrivateFileMode); err != nil {
 		return "", err
 	}
 

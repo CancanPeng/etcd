@@ -21,16 +21,13 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/coreos/go-semver/semver"
 	"go.uber.org/zap/zaptest"
 
-	"go.etcd.io/etcd/pkg/v3/testutil"
-	"go.etcd.io/etcd/pkg/v3/types"
+	"go.etcd.io/etcd/client/pkg/v3/testutil"
+	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
 	"go.etcd.io/etcd/server/v3/mock/mockstore"
-
-	"go.uber.org/zap"
 )
 
 func TestClusterMember(t *testing.T) {
@@ -242,7 +239,7 @@ func TestClusterValidateAndAssignIDsBad(t *testing.T) {
 	for i, tt := range tests {
 		ecl := newTestCluster(t, tt.clmembs)
 		lcl := newTestCluster(t, tt.membs)
-		if err := ValidateClusterAndAssignIDs(zap.NewExample(), lcl, ecl); err == nil {
+		if err := ValidateClusterAndAssignIDs(zaptest.NewLogger(t), lcl, ecl); err == nil {
 			t.Errorf("#%d: unexpected update success", i)
 		}
 	}
@@ -269,7 +266,7 @@ func TestClusterValidateAndAssignIDs(t *testing.T) {
 	for i, tt := range tests {
 		lcl := newTestCluster(t, tt.clmembs)
 		ecl := newTestCluster(t, tt.membs)
-		if err := ValidateClusterAndAssignIDs(zap.NewExample(), lcl, ecl); err != nil {
+		if err := ValidateClusterAndAssignIDs(zaptest.NewLogger(t), lcl, ecl); err != nil {
 			t.Errorf("#%d: unexpect update error: %v", i, err)
 		}
 		if !reflect.DeepEqual(lcl.MemberIDs(), tt.wids) {
@@ -279,13 +276,17 @@ func TestClusterValidateAndAssignIDs(t *testing.T) {
 }
 
 func TestClusterValidateConfigurationChange(t *testing.T) {
-	cl := NewCluster(zap.NewExample(), "")
+	cl := NewCluster(zaptest.NewLogger(t), WithMaxLearners(1))
 	cl.SetStore(v2store.New())
 	for i := 1; i <= 4; i++ {
-		attr := RaftAttributes{PeerURLs: []string{fmt.Sprintf("http://127.0.0.1:%d", i)}}
-		cl.AddMember(&Member{ID: types.ID(i), RaftAttributes: attr})
+		var isLearner bool
+		if i == 1 {
+			isLearner = true
+		}
+		attr := RaftAttributes{PeerURLs: []string{fmt.Sprintf("http://127.0.0.1:%d", i)}, IsLearner: isLearner}
+		cl.AddMember(&Member{ID: types.ID(i), RaftAttributes: attr}, true)
 	}
-	cl.RemoveMember(4)
+	cl.RemoveMember(4, true)
 
 	attr := RaftAttributes{PeerURLs: []string{fmt.Sprintf("http://127.0.0.1:%d", 1)}}
 	ctx, err := json.Marshal(&Member{ID: types.ID(5), RaftAttributes: attr})
@@ -327,6 +328,17 @@ func TestClusterValidateConfigurationChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	attr = RaftAttributes{PeerURLs: []string{fmt.Sprintf("http://127.0.0.1:%d", 7)}, IsLearner: true}
+	ctx7, err := json.Marshal(&ConfigChangeContext{Member: Member{ID: types.ID(7), RaftAttributes: attr}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attr = RaftAttributes{PeerURLs: []string{fmt.Sprintf("http://127.0.0.1:%d", 1)}, IsLearner: true}
+	ctx8, err := json.Marshal(&ConfigChangeContext{Member: Member{ID: types.ID(1), RaftAttributes: attr}, IsPromote: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		cc   raftpb.ConfChange
 		werr error
@@ -424,6 +436,22 @@ func TestClusterValidateConfigurationChange(t *testing.T) {
 			},
 			ErrIDNotFound,
 		},
+		{
+			raftpb.ConfChange{
+				Type:    raftpb.ConfChangeAddLearnerNode,
+				NodeID:  7,
+				Context: ctx7,
+			},
+			ErrTooManyLearners,
+		},
+		{
+			raftpb.ConfChange{
+				Type:    raftpb.ConfChangeAddNode,
+				NodeID:  1,
+				Context: ctx8,
+			},
+			nil,
+		},
 	}
 	for i, tt := range tests {
 		err := cl.ValidateConfigurationChange(tt.cc)
@@ -446,7 +474,7 @@ func TestClusterGenID(t *testing.T) {
 	previd := cs.ID()
 
 	cs.SetStore(mockstore.NewNop())
-	cs.AddMember(newTestMember(3, nil, "", nil))
+	cs.AddMember(newTestMember(3, nil, "", nil), true)
 	cs.genID()
 	if cs.ID() == previd {
 		t.Fatalf("cluster.ID = %v, want not %v", cs.ID(), previd)
@@ -479,7 +507,7 @@ func TestNodeToMemberBad(t *testing.T) {
 		}},
 	}
 	for i, tt := range tests {
-		if _, err := nodeToMember(zap.NewExample(), tt); err == nil {
+		if _, err := nodeToMember(zaptest.NewLogger(t), tt); err == nil {
 			t.Errorf("#%d: unexpected nil error", i)
 		}
 	}
@@ -489,7 +517,7 @@ func TestClusterAddMember(t *testing.T) {
 	st := mockstore.NewRecorder()
 	c := newTestCluster(t, nil)
 	c.SetStore(st)
-	c.AddMember(newTestMember(1, nil, "node1", nil))
+	c.AddMember(newTestMember(1, nil, "node1", nil), true)
 
 	wactions := []testutil.Action{
 		{
@@ -512,7 +540,7 @@ func TestClusterAddMemberAsLearner(t *testing.T) {
 	st := mockstore.NewRecorder()
 	c := newTestCluster(t, nil)
 	c.SetStore(st)
-	c.AddMember(newTestMemberAsLearner(1, nil, "node1", nil))
+	c.AddMember(newTestMemberAsLearner(1, nil, "node1", nil), true)
 
 	wactions := []testutil.Action{
 		{
@@ -555,7 +583,7 @@ func TestClusterRemoveMember(t *testing.T) {
 	st := mockstore.NewRecorder()
 	c := newTestCluster(t, nil)
 	c.SetStore(st)
-	c.RemoveMember(1)
+	c.RemoveMember(1, true)
 
 	wactions := []testutil.Action{
 		{Name: "Delete", Params: []interface{}{MemberStoreKey(1), true, true}},
@@ -595,7 +623,7 @@ func TestClusterUpdateAttributes(t *testing.T) {
 		c := newTestCluster(t, tt.mems)
 		c.removed = tt.removed
 
-		c.UpdateAttributes(types.ID(1), Attributes{Name: name, ClientURLs: clientURLs})
+		c.UpdateAttributes(types.ID(1), Attributes{Name: name, ClientURLs: clientURLs}, true)
 		if g := c.Members(); !reflect.DeepEqual(g, tt.wmems) {
 			t.Errorf("#%d: members = %+v, want %+v", i, g, tt.wmems)
 		}
@@ -608,7 +636,7 @@ func TestNodeToMember(t *testing.T) {
 		{Key: "/1234/raftAttributes", Value: stringp(`{"peerURLs":null}`)},
 	}}
 	wm := &Member{ID: 0x1234, RaftAttributes: RaftAttributes{}, Attributes: Attributes{Name: "node1"}}
-	m, err := nodeToMember(zap.NewExample(), n)
+	m, err := nodeToMember(zaptest.NewLogger(t), n)
 	if err != nil {
 		t.Fatalf("unexpected nodeToMember error: %v", err)
 	}
@@ -945,77 +973,5 @@ func TestIsReadyToPromoteMember(t *testing.T) {
 		if got := c.IsReadyToPromoteMember(tt.promoteID); got != tt.want {
 			t.Errorf("%d: isReadyToPromoteMember returned %t, want %t", i, got, tt.want)
 		}
-	}
-}
-
-func TestIsVersionChangable(t *testing.T) {
-	v0 := semver.Must(semver.NewVersion("2.4.0"))
-	v1 := semver.Must(semver.NewVersion("3.4.0"))
-	v2 := semver.Must(semver.NewVersion("3.5.0"))
-	v3 := semver.Must(semver.NewVersion("3.5.1"))
-	v4 := semver.Must(semver.NewVersion("3.6.0"))
-
-	tests := []struct {
-		name           string
-		currentVersion *semver.Version
-		localVersion   *semver.Version
-		expectedResult bool
-	}{
-		{
-			name:           "When local version is one minor lower than cluster version",
-			currentVersion: v2,
-			localVersion:   v1,
-			expectedResult: true,
-		},
-		{
-			name:           "When local version is one minor and one patch lower than cluster version",
-			currentVersion: v3,
-			localVersion:   v1,
-			expectedResult: true,
-		},
-		{
-			name:           "When local version is one minor higher than cluster version",
-			currentVersion: v1,
-			localVersion:   v2,
-			expectedResult: true,
-		},
-		{
-			name:           "When local version is two minor higher than cluster version",
-			currentVersion: v1,
-			localVersion:   v4,
-			expectedResult: true,
-		},
-		{
-			name:           "When local version is one major higher than cluster version",
-			currentVersion: v0,
-			localVersion:   v1,
-			expectedResult: false,
-		},
-		{
-			name:           "When local version is equal to cluster version",
-			currentVersion: v1,
-			localVersion:   v1,
-			expectedResult: false,
-		},
-		{
-			name:           "When local version is one patch higher than cluster version",
-			currentVersion: v2,
-			localVersion:   v3,
-			expectedResult: false,
-		},
-		{
-			name:           "When local version is two minor lower than cluster version",
-			currentVersion: v4,
-			localVersion:   v1,
-			expectedResult: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if ret := IsValidVersionChange(tt.currentVersion, tt.localVersion); ret != tt.expectedResult {
-				t.Errorf("Expected %v; Got %v", tt.expectedResult, ret)
-			}
-		})
 	}
 }

@@ -23,7 +23,8 @@ import (
 	"strings"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/client/v3"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/pkg/v3/cobrautl"
 
 	"github.com/spf13/cobra"
 )
@@ -44,7 +45,7 @@ func NewTxnCommand() *cobra.Command {
 // txnCommandFunc executes the "txn" command.
 func txnCommandFunc(cmd *cobra.Command, args []string) {
 	if len(args) != 0 {
-		ExitWithError(ExitBadArgs, fmt.Errorf("txn command does not accept argument"))
+		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("txn command does not accept argument"))
 	}
 
 	reader := bufio.NewReader(os.Stdin)
@@ -59,7 +60,7 @@ func txnCommandFunc(cmd *cobra.Command, args []string) {
 
 	resp, err := txn.Commit()
 	if err != nil {
-		ExitWithError(ExitError, err)
+		cobrautl.ExitWithError(cobrautl.ExitError, err)
 	}
 
 	display.Txn(*resp)
@@ -75,7 +76,7 @@ func readCompares(r *bufio.Reader) (cmps []clientv3.Cmp) {
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
-			ExitWithError(ExitInvalidInput, err)
+			cobrautl.ExitWithError(cobrautl.ExitInvalidInput, err)
 		}
 
 		// remove space from the line
@@ -84,9 +85,9 @@ func readCompares(r *bufio.Reader) (cmps []clientv3.Cmp) {
 			break
 		}
 
-		cmp, err := parseCompare(line)
+		cmp, err := ParseCompare(line)
 		if err != nil {
-			ExitWithError(ExitInvalidInput, err)
+			cobrautl.ExitWithError(cobrautl.ExitInvalidInput, err)
 		}
 		cmps = append(cmps, *cmp)
 	}
@@ -98,7 +99,7 @@ func readOps(r *bufio.Reader) (ops []clientv3.Op) {
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
-			ExitWithError(ExitInvalidInput, err)
+			cobrautl.ExitWithError(cobrautl.ExitInvalidInput, err)
 		}
 
 		// remove space from the line
@@ -109,7 +110,7 @@ func readOps(r *bufio.Reader) (ops []clientv3.Op) {
 
 		op, err := parseRequestUnion(line)
 		if err != nil {
-			ExitWithError(ExitInvalidInput, err)
+			cobrautl.ExitWithError(cobrautl.ExitInvalidInput, err)
 		}
 		ops = append(ops, *op)
 	}
@@ -118,7 +119,7 @@ func readOps(r *bufio.Reader) (ops []clientv3.Op) {
 }
 
 func parseRequestUnion(line string) (*clientv3.Op, error) {
-	args := argify(line)
+	args := Argify(line)
 	if len(args) < 2 {
 		return nil, fmt.Errorf("invalid txn compare request: %s", line)
 	}
@@ -152,7 +153,7 @@ func parseRequestUnion(line string) (*clientv3.Op, error) {
 	return &op, nil
 }
 
-func parseCompare(line string) (*clientv3.Cmp, error) {
+func ParseCompare(line string) (*clientv3.Cmp, error) {
 	var (
 		key string
 		op  string

@@ -16,9 +16,8 @@ package embed
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
-	"io/ioutil"
+	"io"
 	defaultLog "log"
 	"net"
 	"net/http"
@@ -26,22 +25,21 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"go.etcd.io/etcd/api/v3/version"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
+	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/pkg/v3/debugutil"
 	runtimeutil "go.etcd.io/etcd/pkg/v3/runtime"
-	"go.etcd.io/etcd/pkg/v3/transport"
-	"go.etcd.io/etcd/pkg/v3/types"
 	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v2http"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v2v3"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v3client"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v3rpc"
+	"go.etcd.io/etcd/server/v3/storage"
+	"go.etcd.io/etcd/server/v3/verify"
 
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/soheilhy/cmux"
@@ -71,6 +69,8 @@ type Etcd struct {
 	// a map of contexts for the servers that serves client requests.
 	sctxs            map[string]*serveCtx
 	metricsListeners []net.Listener
+
+	tracingExporterShutdown func()
 
 	Server *etcdserver.EtcdServer
 
@@ -163,58 +163,84 @@ func StartEtcd(inCfg *Config) (e *Etcd, err error) {
 	backendFreelistType := parseBackendFreelistType(cfg.BackendFreelistType)
 
 	srvcfg := config.ServerConfig{
-		Name:                        cfg.Name,
-		ClientURLs:                  cfg.ACUrls,
-		PeerURLs:                    cfg.APUrls,
-		DataDir:                     cfg.Dir,
-		DedicatedWALDir:             cfg.WalDir,
-		SnapshotCount:               cfg.SnapshotCount,
-		SnapshotCatchUpEntries:      cfg.SnapshotCatchUpEntries,
-		MaxSnapFiles:                cfg.MaxSnapFiles,
-		MaxWALFiles:                 cfg.MaxWalFiles,
-		InitialPeerURLsMap:          urlsmap,
-		InitialClusterToken:         token,
-		DiscoveryURL:                cfg.Durl,
-		DiscoveryProxy:              cfg.Dproxy,
-		NewCluster:                  cfg.IsNewCluster(),
-		PeerTLSInfo:                 cfg.PeerTLSInfo,
-		TickMs:                      cfg.TickMs,
-		ElectionTicks:               cfg.ElectionTicks(),
-		InitialElectionTickAdvance:  cfg.InitialElectionTickAdvance,
-		AutoCompactionRetention:     autoCompactionRetention,
-		AutoCompactionMode:          cfg.AutoCompactionMode,
-		QuotaBackendBytes:           cfg.QuotaBackendBytes,
-		BackendBatchLimit:           cfg.BackendBatchLimit,
-		BackendFreelistType:         backendFreelistType,
-		BackendBatchInterval:        cfg.BackendBatchInterval,
-		MaxTxnOps:                   cfg.MaxTxnOps,
-		MaxRequestBytes:             cfg.MaxRequestBytes,
-		SocketOpts:                  cfg.SocketOpts,
-		StrictReconfigCheck:         cfg.StrictReconfigCheck,
-		ClientCertAuthEnabled:       cfg.ClientTLSInfo.ClientCertAuth,
-		AuthToken:                   cfg.AuthToken,
-		BcryptCost:                  cfg.BcryptCost,
-		TokenTTL:                    cfg.AuthTokenTTL,
-		CORS:                        cfg.CORS,
-		HostWhitelist:               cfg.HostWhitelist,
-		InitialCorruptCheck:         cfg.ExperimentalInitialCorruptCheck,
-		CorruptCheckTime:            cfg.ExperimentalCorruptCheckTime,
-		PreVote:                     cfg.PreVote,
-		Logger:                      cfg.logger,
-		LoggerConfig:                cfg.loggerConfig,
-		LoggerCore:                  cfg.loggerCore,
-		LoggerWriteSyncer:           cfg.loggerWriteSyncer,
-		ForceNewCluster:             cfg.ForceNewCluster,
-		EnableGRPCGateway:           cfg.EnableGRPCGateway,
-		UnsafeNoFsync:               cfg.UnsafeNoFsync,
-		EnableLeaseCheckpoint:       cfg.ExperimentalEnableLeaseCheckpoint,
-		CompactionBatchLimit:        cfg.ExperimentalCompactionBatchLimit,
-		WatchProgressNotifyInterval: cfg.ExperimentalWatchProgressNotifyInterval,
-		DowngradeCheckTime:          cfg.ExperimentalDowngradeCheckTime,
-		WarningApplyDuration:        cfg.ExperimentalWarningApplyDuration,
-		ExperimentalMemoryMlock:     cfg.ExperimentalMemoryMlock,
+		Name:                                     cfg.Name,
+		ClientURLs:                               cfg.ACUrls,
+		PeerURLs:                                 cfg.APUrls,
+		DataDir:                                  cfg.Dir,
+		DedicatedWALDir:                          cfg.WalDir,
+		SnapshotCount:                            cfg.SnapshotCount,
+		SnapshotCatchUpEntries:                   cfg.SnapshotCatchUpEntries,
+		MaxSnapFiles:                             cfg.MaxSnapFiles,
+		MaxWALFiles:                              cfg.MaxWalFiles,
+		InitialPeerURLsMap:                       urlsmap,
+		InitialClusterToken:                      token,
+		DiscoveryURL:                             cfg.Durl,
+		DiscoveryProxy:                           cfg.Dproxy,
+		DiscoveryCfg:                             cfg.DiscoveryCfg,
+		NewCluster:                               cfg.IsNewCluster(),
+		PeerTLSInfo:                              cfg.PeerTLSInfo,
+		TickMs:                                   cfg.TickMs,
+		ElectionTicks:                            cfg.ElectionTicks(),
+		WaitClusterReadyTimeout:                  cfg.ExperimentalWaitClusterReadyTimeout,
+		InitialElectionTickAdvance:               cfg.InitialElectionTickAdvance,
+		AutoCompactionRetention:                  autoCompactionRetention,
+		AutoCompactionMode:                       cfg.AutoCompactionMode,
+		QuotaBackendBytes:                        cfg.QuotaBackendBytes,
+		BackendBatchLimit:                        cfg.BackendBatchLimit,
+		BackendFreelistType:                      backendFreelistType,
+		BackendBatchInterval:                     cfg.BackendBatchInterval,
+		MaxTxnOps:                                cfg.MaxTxnOps,
+		MaxRequestBytes:                          cfg.MaxRequestBytes,
+		SocketOpts:                               cfg.SocketOpts,
+		StrictReconfigCheck:                      cfg.StrictReconfigCheck,
+		ClientCertAuthEnabled:                    cfg.ClientTLSInfo.ClientCertAuth,
+		AuthToken:                                cfg.AuthToken,
+		BcryptCost:                               cfg.BcryptCost,
+		TokenTTL:                                 cfg.AuthTokenTTL,
+		CORS:                                     cfg.CORS,
+		HostWhitelist:                            cfg.HostWhitelist,
+		InitialCorruptCheck:                      cfg.ExperimentalInitialCorruptCheck,
+		CorruptCheckTime:                         cfg.ExperimentalCorruptCheckTime,
+		PreVote:                                  cfg.PreVote,
+		Logger:                                   cfg.logger,
+		ForceNewCluster:                          cfg.ForceNewCluster,
+		EnableGRPCGateway:                        cfg.EnableGRPCGateway,
+		ExperimentalEnableDistributedTracing:     cfg.ExperimentalEnableDistributedTracing,
+		UnsafeNoFsync:                            cfg.UnsafeNoFsync,
+		EnableLeaseCheckpoint:                    cfg.ExperimentalEnableLeaseCheckpoint,
+		LeaseCheckpointPersist:                   cfg.ExperimentalEnableLeaseCheckpointPersist,
+		CompactionBatchLimit:                     cfg.ExperimentalCompactionBatchLimit,
+		CompactionSleepInterval:                  cfg.ExperimentalCompactionSleepInterval,
+		WatchProgressNotifyInterval:              cfg.ExperimentalWatchProgressNotifyInterval,
+		DowngradeCheckTime:                       cfg.ExperimentalDowngradeCheckTime,
+		WarningApplyDuration:                     cfg.ExperimentalWarningApplyDuration,
+		WarningUnaryRequestDuration:              cfg.ExperimentalWarningUnaryRequestDuration,
+		ExperimentalMemoryMlock:                  cfg.ExperimentalMemoryMlock,
+		ExperimentalTxnModeWriteWithSharedBuffer: cfg.ExperimentalTxnModeWriteWithSharedBuffer,
+		ExperimentalBootstrapDefragThresholdMegabytes: cfg.ExperimentalBootstrapDefragThresholdMegabytes,
+		ExperimentalMaxLearners:                       cfg.ExperimentalMaxLearners,
+		V2Deprecation:                                 cfg.V2DeprecationEffective(),
 	}
+
+	if srvcfg.ExperimentalEnableDistributedTracing {
+		tctx := context.Background()
+		tracingExporter, opts, err := setupTracingExporter(tctx, cfg)
+		if err != nil {
+			return e, err
+		}
+		if tracingExporter == nil || len(opts) == 0 {
+			return e, fmt.Errorf("error setting up distributed tracing")
+		}
+		e.tracingExporterShutdown = func() { tracingExporter.Shutdown(tctx) }
+		srvcfg.ExperimentalTracerOptions = opts
+
+		e.cfg.logger.Info(
+			"distributed tracing setup enabled",
+		)
+	}
+
 	print(e.cfg.logger, *cfg, srvcfg, memberInitialized)
+
 	if e.Server, err = etcdserver.NewServer(srvcfg); err != nil {
 		return e, err
 	}
@@ -228,6 +254,9 @@ func StartEtcd(inCfg *Config) (e *Etcd, err error) {
 		if err = e.Server.CheckInitialHashKV(); err != nil {
 			// set "EtcdServer" to nil, so that it does not block on "EtcdServer.Close()"
 			// (nothing to close since rafthttp transports have not been started)
+
+			e.cfg.logger.Error("checkInitialHashKV failed", zap.Error(err))
+			e.Server.Cleanup()
 			e.Server = nil
 			return e, err
 		}
@@ -272,7 +301,7 @@ func print(lg *zap.Logger, ec Config, sc config.ServerConfig, memberInitialized 
 
 	quota := ec.QuotaBackendBytes
 	if quota == 0 {
-		quota = etcdserver.DefaultQuotaBytes
+		quota = storage.DefaultQuotaBytes
 	}
 
 	lg.Info(
@@ -293,6 +322,7 @@ func print(lg *zap.Logger, ec Config, sc config.ServerConfig, memberInitialized 
 		zap.Bool("force-new-cluster", sc.ForceNewCluster),
 		zap.String("heartbeat-interval", fmt.Sprintf("%v", time.Duration(sc.TickMs)*time.Millisecond)),
 		zap.String("election-timeout", fmt.Sprintf("%v", time.Duration(sc.ElectionTicks*int(sc.TickMs))*time.Millisecond)),
+		zap.String("wait-cluster-ready-timeout", sc.WaitClusterReadyTimeout.String()),
 		zap.Bool("initial-election-tick-advance", sc.InitialElectionTickAdvance),
 		zap.Uint64("snapshot-count", sc.SnapshotCount),
 		zap.Uint64("snapshot-catchup-entries", sc.SnapshotCatchUpEntries),
@@ -315,7 +345,22 @@ func print(lg *zap.Logger, ec Config, sc config.ServerConfig, memberInitialized 
 		zap.String("auto-compaction-interval", sc.AutoCompactionRetention.String()),
 		zap.String("discovery-url", sc.DiscoveryURL),
 		zap.String("discovery-proxy", sc.DiscoveryProxy),
+
+		zap.String("discovery-token", sc.DiscoveryCfg.Token),
+		zap.String("discovery-endpoints", strings.Join(sc.DiscoveryCfg.Endpoints, ",")),
+		zap.String("discovery-dial-timeout", sc.DiscoveryCfg.DialTimeout.String()),
+		zap.String("discovery-request-timeout", sc.DiscoveryCfg.RequestTimeout.String()),
+		zap.String("discovery-keepalive-time", sc.DiscoveryCfg.KeepAliveTime.String()),
+		zap.String("discovery-keepalive-timeout", sc.DiscoveryCfg.KeepAliveTimeout.String()),
+		zap.Bool("discovery-insecure-transport", sc.DiscoveryCfg.Secure.InsecureTransport),
+		zap.Bool("discovery-insecure-skip-tls-verify", sc.DiscoveryCfg.Secure.InsecureSkipVerify),
+		zap.String("discovery-cert", sc.DiscoveryCfg.Secure.Cert),
+		zap.String("discovery-key", sc.DiscoveryCfg.Secure.Key),
+		zap.String("discovery-cacert", sc.DiscoveryCfg.Secure.Cacert),
+		zap.String("discovery-user", sc.DiscoveryCfg.Auth.Username),
+
 		zap.String("downgrade-check-interval", sc.DowngradeCheckTime.String()),
+		zap.Int("max-learners", sc.ExperimentalMaxLearners),
 	)
 }
 
@@ -338,10 +383,17 @@ func (e *Etcd) Close() {
 	lg.Info("closing etcd server", fields...)
 	defer func() {
 		lg.Info("closed etcd server", fields...)
+		verify.MustVerifyIfEnabled(verify.Config{
+			Logger:     lg,
+			DataDir:    e.cfg.Dir,
+			ExactIndex: false,
+		})
 		lg.Sync()
 	}()
 
-	e.closeOnce.Do(func() { close(e.stopc) })
+	e.closeOnce.Do(func() {
+		close(e.stopc)
+	})
 
 	// close client requests with request timeout
 	timeout := 2 * time.Second
@@ -370,6 +422,11 @@ func (e *Etcd) Close() {
 		e.metricsListeners[i].Close()
 	}
 
+	// shutdown tracing exporter
+	if e.tracingExporterShutdown != nil {
+		e.tracingExporterShutdown()
+	}
+
 	// close rafthttp transports
 	if e.Server != nil {
 		e.Server.Stop()
@@ -383,12 +440,14 @@ func (e *Etcd) Close() {
 			cancel()
 		}
 	}
+	if e.errc != nil {
+		close(e.errc)
+	}
 }
 
 func stopServers(ctx context.Context, ss *servers) {
 	// first, close the http.Server
 	ss.http.Shutdown(ctx)
-
 	// do not grpc.Server.GracefulStop with TLS enabled etcd server
 	// See https://github.com/grpc/grpc-go/issues/1384#issuecomment-317124531
 	// and https://github.com/etcd-io/etcd/issues/8916
@@ -418,7 +477,11 @@ func stopServers(ctx context.Context, ss *servers) {
 	}
 }
 
-func (e *Etcd) Err() <-chan error { return e.errc }
+// Err - return channel used to report errors during etcd run/shutdown.
+// Since etcd 3.5 the channel is being closed when the etcd is over.
+func (e *Etcd) Err() <-chan error {
+	return e.errc
+}
 
 func configurePeerListeners(cfg *Config) (peers []*peerListener, err error) {
 	if err = updateCipherSuites(&cfg.PeerTLSInfo, cfg.CipherSuites); err != nil {
@@ -483,25 +546,23 @@ func configurePeerListeners(cfg *Config) (peers []*peerListener, err error) {
 // configure peer handlers after rafthttp.Transport started
 func (e *Etcd) servePeers() (err error) {
 	ph := etcdhttp.NewPeerHandler(e.GetLogger(), e.Server)
-	var peerTLScfg *tls.Config
-	if !e.cfg.PeerTLSInfo.Empty() {
-		if peerTLScfg, err = e.cfg.PeerTLSInfo.ServerConfig(); err != nil {
-			return err
-		}
-	}
 
 	for _, p := range e.Peers {
 		u := p.Listener.Addr().String()
-		gs := v3rpc.Server(e.Server, peerTLScfg)
 		m := cmux.New(p.Listener)
-		go gs.Serve(m.Match(cmux.HTTP2()))
 		srv := &http.Server{
-			Handler:     grpcHandlerFunc(gs, ph),
+			Handler:     ph,
 			ReadTimeout: 5 * time.Minute,
-			ErrorLog:    defaultLog.New(ioutil.Discard, "", 0), // do not log user error
+			ErrorLog:    defaultLog.New(io.Discard, "", 0), // do not log user error
 		}
 		go srv.Serve(m.Match(cmux.Any()))
-		p.serve = func() error { return m.Serve() }
+		p.serve = func() error {
+			e.cfg.logger.Info(
+				"cmux::serve",
+				zap.String("address", u),
+			)
+			return m.Serve()
+		}
 		p.close = func(ctx context.Context) error {
 			// gracefully shutdown http.Server
 			// close open listeners, idle connections
@@ -510,11 +571,12 @@ func (e *Etcd) servePeers() (err error) {
 				"stopping serving peer traffic",
 				zap.String("address", u),
 			)
-			stopServers(ctx, &servers{secure: peerTLScfg != nil, grpc: gs, http: srv})
+			srv.Shutdown(ctx)
 			e.cfg.logger.Info(
 				"stopped serving peer traffic",
 				zap.String("address", u),
 			)
+			m.Close()
 			return nil
 		}
 	}
@@ -638,20 +700,11 @@ func (e *Etcd) serveClients() (err error) {
 	}
 
 	// Start a client server goroutine for each listen address
-	var h http.Handler
-	if e.Config().EnableV2 {
-		if len(e.Config().ExperimentalEnableV2V3) > 0 {
-			srv := v2v3.NewServer(e.cfg.logger, v3client.New(e.Server), e.cfg.ExperimentalEnableV2V3)
-			h = v2http.NewClientHandler(e.GetLogger(), srv, e.Server.Cfg.ReqTimeout())
-		} else {
-			h = v2http.NewClientHandler(e.GetLogger(), e.Server, e.Server.Cfg.ReqTimeout())
-		}
-	} else {
-		mux := http.NewServeMux()
-		etcdhttp.HandleBasic(e.cfg.logger, mux, e.Server)
-		etcdhttp.HandleMetricsHealthForV3(e.cfg.logger, mux, e.Server)
-		h = mux
-	}
+	mux := http.NewServeMux()
+	etcdhttp.HandleDebug(mux)
+	etcdhttp.HandleVersion(mux, e.Server)
+	etcdhttp.HandleMetrics(mux)
+	etcdhttp.HandleHealth(e.cfg.logger, mux, e.Server)
 
 	gopts := []grpc.ServerOption{}
 	if e.cfg.GRPCKeepAliveMinTime > time.Duration(0) {
@@ -671,7 +724,7 @@ func (e *Etcd) serveClients() (err error) {
 	// start client servers in each goroutine
 	for _, sctx := range e.sctxs {
 		go func(s *serveCtx) {
-			e.errHandler(s.serve(e.Server, &e.cfg.ClientTLSInfo, h, e.errHandler, gopts...))
+			e.errHandler(s.serve(e.Server, &e.cfg.ClientTLSInfo, mux, e.errHandler, gopts...))
 		}(sctx)
 	}
 	return nil
@@ -684,7 +737,8 @@ func (e *Etcd) serveMetrics() (err error) {
 
 	if len(e.cfg.ListenMetricsUrls) > 0 {
 		metricsMux := http.NewServeMux()
-		etcdhttp.HandleMetricsHealthForV3(e.cfg.logger, metricsMux, e.Server)
+		etcdhttp.HandleMetrics(metricsMux)
+		etcdhttp.HandleHealth(e.cfg.logger, metricsMux, e.Server)
 
 		for _, murl := range e.cfg.ListenMetricsUrls {
 			tlsInfo := &e.cfg.ClientTLSInfo

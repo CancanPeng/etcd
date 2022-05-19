@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package v2error describes errors in etcd project. When any change happens,
-// https://github.com/etcd-io/website/blob/master/content/docs/v2/errorcode.md
+// https://github.com/etcd-io/website/blob/main/content/docs/v2/errorcode.md
 // needs to be updated correspondingly.
 // To be deprecated in favor of v3 APIs.
 package v2error
@@ -123,10 +123,6 @@ type Error struct {
 	Message   string `json:"message"`
 	Cause     string `json:"cause,omitempty"`
 	Index     uint64 `json:"index"`
-}
-
-func NewRequestError(errorCode int, cause string) *Error {
-	return NewError(errorCode, cause, 0)
 }
 
 func NewError(errorCode int, cause string, index uint64) *Error {

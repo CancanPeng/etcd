@@ -16,50 +16,53 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
+	"golang.org/x/sync/errgroup"
 )
 
 func TestMoveLeader(t *testing.T)        { testMoveLeader(t, true) }
 func TestMoveLeaderService(t *testing.T) { testMoveLeader(t, false) }
 
 func testMoveLeader(t *testing.T, auto bool) {
-	BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := NewClusterV3(t, &ClusterConfig{Size: 3})
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	oldLeadIdx := clus.WaitLeader(t)
-	oldLeadID := uint64(clus.Members[oldLeadIdx].s.ID())
+	oldLeadID := uint64(clus.Members[oldLeadIdx].Server.ID())
 
-	// ensure followers go through leader transition while learship transfer
+	// ensure followers go through leader transition while leadership transfer
 	idc := make(chan uint64)
 	stopc := make(chan struct{})
 	defer close(stopc)
 
 	for i := range clus.Members {
 		if oldLeadIdx != i {
-			go func(m *member) {
+			go func(m *integration.Member) {
 				select {
-				case idc <- checkLeaderTransition(m, oldLeadID):
+				case idc <- integration.CheckLeaderTransition(m, oldLeadID):
 				case <-stopc:
 				}
 			}(clus.Members[i])
 		}
 	}
 
-	target := uint64(clus.Members[(oldLeadIdx+1)%3].s.ID())
+	target := uint64(clus.Members[(oldLeadIdx+1)%3].Server.ID())
 	if auto {
-		err := clus.Members[oldLeadIdx].s.TransferLeadership()
+		err := clus.Members[oldLeadIdx].Server.TransferLeadership()
 		if err != nil {
 			t.Fatal(err)
 		}
 	} else {
-		mvc := toGRPC(clus.Client(oldLeadIdx)).Maintenance
+		mvc := integration.ToGRPC(clus.Client(oldLeadIdx)).Maintenance
 		_, err := mvc.MoveLeader(context.TODO(), &pb.MoveLeaderRequest{TargetID: target})
 		if err != nil {
 			t.Fatal(err)
@@ -96,17 +99,17 @@ func testMoveLeader(t *testing.T, auto bool) {
 
 // TestMoveLeaderError ensures that request to non-leader fail.
 func TestMoveLeaderError(t *testing.T) {
-	BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := NewClusterV3(t, &ClusterConfig{Size: 3})
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	oldLeadIdx := clus.WaitLeader(t)
 	followerIdx := (oldLeadIdx + 1) % 3
 
-	target := uint64(clus.Members[(oldLeadIdx+2)%3].s.ID())
+	target := uint64(clus.Members[(oldLeadIdx+2)%3].Server.ID())
 
-	mvc := toGRPC(clus.Client(followerIdx)).Maintenance
+	mvc := integration.ToGRPC(clus.Client(followerIdx)).Maintenance
 	_, err := mvc.MoveLeader(context.TODO(), &pb.MoveLeaderRequest{TargetID: target})
 	if !eqErrGRPC(err, rpctypes.ErrGRPCNotLeader) {
 		t.Errorf("err = %v, want %v", err, rpctypes.ErrGRPCNotLeader)
@@ -115,9 +118,9 @@ func TestMoveLeaderError(t *testing.T) {
 
 // TestMoveLeaderToLearnerError ensures that leader transfer to learner member will fail.
 func TestMoveLeaderToLearnerError(t *testing.T) {
-	BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := NewClusterV3(t, &ClusterConfig{Size: 3})
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	// we have to add and launch learner member after initial cluster was created, because
@@ -126,10 +129,10 @@ func TestMoveLeaderToLearnerError(t *testing.T) {
 
 	learners, err := clus.GetLearnerMembers()
 	if err != nil {
-		t.Fatalf("failed to get the learner members in cluster: %v", err)
+		t.Fatalf("failed to get the learner members in Cluster: %v", err)
 	}
 	if len(learners) != 1 {
-		t.Fatalf("added 1 learner to cluster, got %d", len(learners))
+		t.Fatalf("added 1 learner to Cluster, got %d", len(learners))
 	}
 
 	learnerID := learners[0].ID
@@ -148,19 +151,19 @@ func TestMoveLeaderToLearnerError(t *testing.T) {
 // TestTransferLeadershipWithLearner ensures TransferLeadership does not timeout due to learner is
 // automatically picked by leader as transferee.
 func TestTransferLeadershipWithLearner(t *testing.T) {
-	BeforeTest(t)
+	integration.BeforeTest(t)
 
-	clus := NewClusterV3(t, &ClusterConfig{Size: 1})
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
 	clus.AddAndLaunchLearnerMember(t)
 
 	learners, err := clus.GetLearnerMembers()
 	if err != nil {
-		t.Fatalf("failed to get the learner members in cluster: %v", err)
+		t.Fatalf("failed to get the learner members in Cluster: %v", err)
 	}
 	if len(learners) != 1 {
-		t.Fatalf("added 1 learner to cluster, got %d", len(learners))
+		t.Fatalf("added 1 learner to Cluster, got %d", len(learners))
 	}
 
 	leaderIdx := clus.WaitLeader(t)
@@ -168,7 +171,7 @@ func TestTransferLeadershipWithLearner(t *testing.T) {
 	go func() {
 		// note that this cluster has 1 leader and 1 learner. TransferLeadership should return nil.
 		// Leadership transfer is skipped in cluster with 1 voting member.
-		errCh <- clus.Members[leaderIdx].s.TransferLeadership()
+		errCh <- clus.Members[leaderIdx].Server.TransferLeadership()
 	}()
 	select {
 	case err := <-errCh:
@@ -178,4 +181,94 @@ func TestTransferLeadershipWithLearner(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Error("timed out waiting for leader transition")
 	}
+}
+
+func TestFirstCommitNotification(t *testing.T) {
+	integration.BeforeTest(t)
+	ctx := context.Background()
+	clusterSize := 3
+	cluster := integration.NewCluster(t, &integration.ClusterConfig{Size: clusterSize})
+	defer cluster.Terminate(t)
+
+	oldLeaderIdx := cluster.WaitLeader(t)
+	oldLeaderClient := cluster.Client(oldLeaderIdx)
+
+	newLeaderIdx := (oldLeaderIdx + 1) % clusterSize
+	newLeaderId := uint64(cluster.Members[newLeaderIdx].ID())
+
+	notifiers := make(map[int]<-chan struct{}, clusterSize)
+	for i, clusterMember := range cluster.Members {
+		notifiers[i] = clusterMember.Server.FirstCommitInTermNotify()
+	}
+
+	_, err := oldLeaderClient.MoveLeader(context.Background(), newLeaderId)
+
+	if err != nil {
+		t.Errorf("got error during leadership transfer: %v", err)
+	}
+
+	t.Logf("Leadership transferred.")
+	t.Logf("Submitting write to make sure empty and 'foo' index entry was already flushed")
+	cli := cluster.RandClient()
+
+	if _, err := cli.Put(ctx, "foo", "bar"); err != nil {
+		t.Fatalf("Failed to put kv pair.")
+	}
+
+	// It's guaranteed now that leader contains the 'foo'->'bar' index entry.
+	leaderAppliedIndex := cluster.Members[newLeaderIdx].Server.AppliedIndex()
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	group, groupContext := errgroup.WithContext(ctx)
+
+	for i, notifier := range notifiers {
+		member, notifier := cluster.Members[i], notifier
+		group.Go(func() error {
+			return checkFirstCommitNotification(groupContext, t, member, leaderAppliedIndex, notifier)
+		})
+	}
+
+	err = group.Wait()
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+func checkFirstCommitNotification(
+	ctx context.Context,
+	t testing.TB,
+	member *integration.Member,
+	leaderAppliedIndex uint64,
+	notifier <-chan struct{},
+) error {
+	// wait until server applies all the changes of leader
+	for member.Server.AppliedIndex() < leaderAppliedIndex {
+		t.Logf("member.Server.AppliedIndex():%v <= leaderAppliedIndex:%v", member.Server.AppliedIndex(), leaderAppliedIndex)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	select {
+	case msg, ok := <-notifier:
+		if ok {
+			return fmt.Errorf(
+				"member with ID %d got message via notifier, msg: %v",
+				member.ID(),
+				msg,
+			)
+		}
+	default:
+		t.Logf("member.Server.AppliedIndex():%v >= leaderAppliedIndex:%v", member.Server.AppliedIndex(), leaderAppliedIndex)
+		return fmt.Errorf(
+			"notification was not triggered, member ID: %d",
+			member.ID(),
+		)
+	}
+
+	return nil
 }

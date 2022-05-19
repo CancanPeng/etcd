@@ -17,15 +17,15 @@ package etcdserver
 import (
 	"bytes"
 	"fmt"
-	"go.etcd.io/etcd/pkg/v3/logutil"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"go.etcd.io/etcd/client/pkg/v3/logutil"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func TestNewRaftLogger(t *testing.T) {
@@ -50,7 +50,7 @@ func TestNewRaftLogger(t *testing.T) {
 	}
 
 	gl.Info("etcd-logutil-1")
-	data, err := ioutil.ReadFile(logPath)
+	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestNewRaftLogger(t *testing.T) {
 	}
 
 	gl.Warning("etcd-logutil-2")
-	data, err = ioutil.ReadFile(logPath)
+	data, err = os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestNewRaftLoggerFromZapCore(t *testing.T) {
 	buf := bytes.NewBuffer(nil)
 	syncer := zapcore.AddSync(buf)
 	cr := zapcore.NewCore(
-		zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
+		zapcore.NewJSONEncoder(logutil.DefaultZapLoggerConfig.EncoderConfig),
 		syncer,
 		zap.NewAtomicLevelAt(zap.InfoLevel),
 	)

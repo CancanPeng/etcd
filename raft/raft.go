@@ -647,7 +647,9 @@ func (r *raft) tickElection() {
 
 	if r.promotable() && r.pastElectionTimeout() {
 		r.electionElapsed = 0
-		r.Step(pb.Message{From: r.id, Type: pb.MsgHup})
+		if err := r.Step(pb.Message{From: r.id, Type: pb.MsgHup}); err != nil {
+			r.logger.Debugf("error occurred during election: %v", err)
+		}
 	}
 }
 
@@ -659,7 +661,9 @@ func (r *raft) tickHeartbeat() {
 	if r.electionElapsed >= r.electionTimeout {
 		r.electionElapsed = 0
 		if r.checkQuorum {
-			r.Step(pb.Message{From: r.id, Type: pb.MsgCheckQuorum})
+			if err := r.Step(pb.Message{From: r.id, Type: pb.MsgCheckQuorum}); err != nil {
+				r.logger.Debugf("error occurred during checking sending heartbeat: %v", err)
+			}
 		}
 		// If current leader cannot transfer leadership in electionTimeout, it becomes leader again.
 		if r.state == StateLeader && r.leadTransferee != None {
@@ -673,7 +677,9 @@ func (r *raft) tickHeartbeat() {
 
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		r.heartbeatElapsed = 0
-		r.Step(pb.Message{From: r.id, Type: pb.MsgBeat})
+		if err := r.Step(pb.Message{From: r.id, Type: pb.MsgBeat}); err != nil {
+			r.logger.Debugf("error occurred during checking sending heartbeat: %v", err)
+		}
 	}
 }
 
@@ -1148,7 +1154,7 @@ func stepLeader(r *raft, m pb.Message) error {
 				// the rejection's log term. If a probe at one of these indexes
 				// succeeded, its log term at that index would match the leader's,
 				// i.e. 3 or 5 in this example. But the follower already told the
-				// leader that it is still at term 2 at index 9, and since the
+				// leader that it is still at term 2 at index 6, and since the
 				// log term only ever goes up (within a log), this is a contradiction.
 				//
 				// At index 1, however, the leader can draw no such conclusion,

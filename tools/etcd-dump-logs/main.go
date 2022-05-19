@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -29,12 +30,12 @@ import (
 	"time"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/pkg/v3/pbutil"
-	"go.etcd.io/etcd/pkg/v3/types"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
-	"go.etcd.io/etcd/server/v3/wal"
-	"go.etcd.io/etcd/server/v3/wal/walpb"
+	"go.etcd.io/etcd/server/v3/storage/wal"
+	"go.etcd.io/etcd/server/v3/storage/wal/walpb"
 	"go.uber.org/zap"
 )
 
@@ -44,6 +45,7 @@ const (
 
 func main() {
 	snapfile := flag.String("start-snap", "", "The base name of snapshot file to start dumping")
+	waldir := flag.String("wal-dir", "", "If set, dumps WAL from the informed path, rather than following the standard 'data_dir/member/wal/' location")
 	index := flag.Uint64("start-index", 0, "The index to start dumping")
 	// Default entry types are Normal and ConfigChange
 	entrytype := flag.String("entry-type", defaultEntryTypes, `If set, filters output by entry type. Must be one or more than one of:
@@ -88,8 +90,12 @@ and output a hex encoded line of binary for each input line`)
 		case nil:
 			walsnap.Index, walsnap.Term = snapshot.Metadata.Index, snapshot.Metadata.Term
 			nodes := genIDSlice(snapshot.Metadata.ConfState.Voters)
-			fmt.Printf("Snapshot:\nterm=%d index=%d nodes=%s\n",
-				walsnap.Term, walsnap.Index, nodes)
+			confstateJson, err := json.Marshal(snapshot.Metadata.ConfState)
+			if err != nil {
+				confstateJson = []byte(fmt.Sprintf("confstate err: %v", err))
+			}
+			fmt.Printf("Snapshot:\nterm=%d index=%d nodes=%s confstate=%s\n",
+				walsnap.Term, walsnap.Index, nodes, confstateJson)
 		case snap.ErrNoSnapshot:
 			fmt.Printf("Snapshot:\nempty\n")
 		default:
@@ -98,7 +104,12 @@ and output a hex encoded line of binary for each input line`)
 		fmt.Println("Start dumping log entries from snapshot.")
 	}
 
-	w, err := wal.OpenForRead(zap.NewExample(), walDir(dataDir), walsnap)
+	wd := *waldir
+	if wd == "" {
+		wd = walDir(dataDir)
+	}
+
+	w, err := wal.OpenForRead(zap.NewExample(), wd, walsnap)
 	if err != nil {
 		log.Fatalf("Failed opening WAL: %v", err)
 	}
@@ -112,8 +123,10 @@ and output a hex encoded line of binary for each input line`)
 	fmt.Printf("WAL metadata:\nnodeID=%s clusterID=%s term=%d commitIndex=%d vote=%s\n",
 		id, cid, state.Term, state.Commit, vid)
 
-	fmt.Printf("WAL entries:\n")
-	fmt.Printf("lastIndex=%d\n", ents[len(ents)-1].Index)
+	fmt.Printf("WAL entries: %d\n", len(ents))
+	if len(ents) > 0 {
+		fmt.Printf("lastIndex=%d\n", ents[len(ents)-1].Index)
+	}
 
 	fmt.Printf("%4s\t%10s\ttype\tdata", "term", "index")
 	if *streamdecoder != "" {
@@ -227,6 +240,10 @@ type EntryPrinter func(e raftpb.Entry)
 func printInternalRaftRequest(entry raftpb.Entry) {
 	var rr etcdserverpb.InternalRaftRequest
 	if err := rr.Unmarshal(entry.Data); err == nil {
+		// Ensure we don't log user password
+		if rr.AuthUserChangePassword != nil && rr.AuthUserChangePassword.Password != "" {
+			rr.AuthUserChangePassword.Password = "<value removed>"
+		}
 		fmt.Printf("%4d\t%10d\tnorm\t%s", entry.Term, entry.Index, rr.String())
 	}
 }

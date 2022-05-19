@@ -3,7 +3,7 @@ etcdctl
 
 `etcdctl` is a command line client for [etcd][etcd].
 
-The v3 API is used by default on master branch. For the v2 API, make sure to set environment variable `ETCDCTL_API=2`. See also [READMEv2][READMEv2].
+The v3 API is used by default on main branch. For the v2 API, make sure to set environment variable `ETCDCTL_API=2`. See also [READMEv2][READMEv2].
 
 If using released versions earlier than v3.4, set `ETCDCTL_API=3` to use v3 API.
 
@@ -809,13 +809,13 @@ Get the status for all endpoints in the cluster associated with the default endp
 
 ```bash
 ./etcdctl -w table endpoint --cluster status
-+------------------------+------------------+----------------+---------+-----------+-----------+------------+
-|        ENDPOINT        |        ID        |    VERSION     | DB SIZE | IS LEADER | RAFT TERM | RAFT INDEX |
-+------------------------+------------------+----------------+---------+-----------+-----------+------------+
-| http://127.0.0.1:2379  | 8211f1d0f64f3269 | 3.2.0-rc.1+git |   25 kB |     false |         2 |          8 |
-| http://127.0.0.1:22379 | 91bc3c398fb3c146 | 3.2.0-rc.1+git |   25 kB |     false |         2 |          8 |
-| http://127.0.0.1:32379 | fd422379fda50e48 | 3.2.0-rc.1+git |   25 kB |      true |         2 |          8 |
-+------------------------+------------------+----------------+---------+-----------+-----------+------------+
++------------------------+------------------+---------------+-----------------+---------+----------------+-----------+------------+-----------+------------+--------------------+--------+
+|        ENDPOINT        |        ID        |    VERSION    | STORAGE VERSION | DB SIZE | DB SIZE IN USE | IS LEADER | IS LEARNER | RAFT TERM | RAFT INDEX | RAFT APPLIED INDEX | ERRORS |
++------------------------+------------------+---------------+-----------------+---------+----------------+-----------+------------+-----------+------------+--------------------+--------+
+|  http://127.0.0.1:2379 | 8211f1d0f64f3269 | 3.6.0-alpha.0 |           3.6.0 |   25 kB |          25 kB |     false |      false |         2 |          8 |                  8 |        |
+| http://127.0.0.1:22379 | 91bc3c398fb3c146 | 3.6.0-alpha.0 |           3.6.0 |   25 kB |          25 kB |      true |      false |         2 |          8 |                  8 |        |
+| http://127.0.0.1:32379 | fd422379fda50e48 | 3.6.0-alpha.0 |           3.6.0 |   25 kB |          25 kB |     false |      false |         2 |          8 |                  8 |        |
++------------------------+------------------+---------------+-----------------+---------+----------------+-----------+------------+-----------+------------+--------------------+--------+
 ```
 
 ### ENDPOINT HASHKV
@@ -913,15 +913,14 @@ If NOSPACE alarm is present:
 
 ### DEFRAG [options]
 
-DEFRAG defragments the backend database file for a set of given endpoints while etcd is running, or directly defragments an etcd data directory while etcd is not running. When an etcd member reclaims storage space from deleted and compacted keys, the space is kept in a free list and the database file remains the same size. By defragmenting the database, the etcd member releases this free space back to the file system.
+DEFRAG defragments the backend database file for a set of given endpoints while etcd is running. When an etcd member reclaims storage space from deleted and compacted keys, the space is kept in a free list and the database file remains the same size. By defragmenting the database, the etcd member releases this free space back to the file system.
+
+**Note: to defragment offline (`--data-dir` flag), use: `etcutl defrag` instead**
 
 **Note that defragmentation to a live member blocks the system from reading and writing data while rebuilding its states.**
 
 **Note that defragmentation request does not get replicated over cluster. That is, the request is only applied to the local node. Specify all members in `--endpoints` flag or `--cluster` flag to automatically find all cluster members.**
 
-#### Options
-
-- data-dir -- Optional. If present, defragments a data directory not in use by etcd.
 
 #### Output
 
@@ -942,15 +941,6 @@ Run defragment operations for all endpoints in the cluster associated with the d
 Finished defragmenting etcd member[http://127.0.0.1:2379]
 Finished defragmenting etcd member[http://127.0.0.1:22379]
 Finished defragmenting etcd member[http://127.0.0.1:32379]
-```
-
-To defragment a data directory directly, use the `--data-dir` flag:
-
-``` bash
-# Defragment while etcd is not running
-./etcdctl defrag --data-dir default.etcd
-# success (exit status 0)
-# Error: cannot open database at default.etcd/member/snap/db
 ```
 
 #### Remarks
@@ -978,80 +968,12 @@ Save a snapshot to "snapshot.db":
 
 ### SNAPSHOT RESTORE [options] \<filename\>
 
-SNAPSHOT RESTORE creates an etcd data directory for an etcd cluster member from a backend database snapshot and a new cluster configuration. Restoring the snapshot into each member for a new cluster configuration will initialize a new etcd cluster preloaded by the snapshot data.
+Removed in v3.6. Use `etcdutl snapshot restore` instead.
 
-#### Options
-
-The snapshot restore options closely resemble to those used in the `etcd` command for defining a cluster.
-
-- data-dir -- Path to the data directory. Uses \<name\>.etcd if none given.
-
-- wal-dir -- Path to the WAL directory. Uses data directory if none given.
-
-- initial-cluster -- The initial cluster configuration for the restored etcd cluster.
-
-- initial-cluster-token -- Initial cluster token for the restored etcd cluster.
-
-- initial-advertise-peer-urls -- List of peer URLs for the member being restored.
-
-- name -- Human-readable name for the etcd cluster member being restored.
-
-- skip-hash-check -- Ignore snapshot integrity hash value (required if copied from data directory)
-
-#### Output
-
-A new etcd data directory initialized with the snapshot.
-
-#### Example
-
-Save a snapshot, restore into a new 3 node cluster, and start the cluster:
-```
-./etcdctl snapshot save snapshot.db
-
-# restore members
-bin/etcdctl snapshot restore snapshot.db --initial-cluster-token etcd-cluster-1 --initial-advertise-peer-urls http://127.0.0.1:12380  --name sshot1 --initial-cluster 'sshot1=http://127.0.0.1:12380,sshot2=http://127.0.0.1:22380,sshot3=http://127.0.0.1:32380'
-bin/etcdctl snapshot restore snapshot.db --initial-cluster-token etcd-cluster-1 --initial-advertise-peer-urls http://127.0.0.1:22380  --name sshot2 --initial-cluster 'sshot1=http://127.0.0.1:12380,sshot2=http://127.0.0.1:22380,sshot3=http://127.0.0.1:32380'
-bin/etcdctl snapshot restore snapshot.db --initial-cluster-token etcd-cluster-1 --initial-advertise-peer-urls http://127.0.0.1:32380  --name sshot3 --initial-cluster 'sshot1=http://127.0.0.1:12380,sshot2=http://127.0.0.1:22380,sshot3=http://127.0.0.1:32380'
-
-# launch members
-bin/etcd --name sshot1 --listen-client-urls http://127.0.0.1:2379 --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://127.0.0.1:12380 &
-bin/etcd --name sshot2 --listen-client-urls http://127.0.0.1:22379 --advertise-client-urls http://127.0.0.1:22379 --listen-peer-urls http://127.0.0.1:22380 &
-bin/etcd --name sshot3 --listen-client-urls http://127.0.0.1:32379 --advertise-client-urls http://127.0.0.1:32379 --listen-peer-urls http://127.0.0.1:32380 &
-```
 
 ### SNAPSHOT STATUS \<filename\>
 
-SNAPSHOT STATUS lists information about a given backend database snapshot file.
-
-#### Output
-
-##### Simple format
-
-Prints a humanized table of the database hash, revision, total keys, and size.
-
-##### JSON format
-
-Prints a line of JSON encoding the database hash, revision, total keys, and size.
-
-#### Examples
-```bash
-./etcdctl snapshot status file.db
-# cf1550fb, 3, 3, 25 kB
-```
-
-```bash
-./etcdctl -write-out=json snapshot status file.db
-# {"hash":3474280699,"revision":3,"totalKey":3,"totalSize":24576}
-```
-
-```bash
-./etcdctl -write-out=table snapshot status file.db
-+----------+----------+------------+------------+
-|   HASH   | REVISION | TOTAL KEYS | TOTAL SIZE |
-+----------+----------+------------+------------+
-| cf1550fb |        3 |          3 | 25 kB      |
-+----------+----------+------------+------------+
-```
+Removed in v3.6. Use `etcdutl snapshot status` instead.
 
 ### MOVE-LEADER \<hexadecimal-transferee-id\>
 
@@ -1074,6 +996,69 @@ echo ${transferee_id}
 # request to leader with target node ID
 ./etcdctl --endpoints ${leader_ep} move-leader ${transferee_id}
 # Leadership transferred from 45ddc0e800e20b93 to c89feb932daef420
+```
+
+### DOWNGRADE \<subcommand\>
+
+NOTICE: Downgrades is an experimental feature in v3.6 and is not recommended for production clusters.
+
+Downgrade provides commands to downgrade cluster.
+Normally etcd members cannot be downgraded due to cluster version mechanism.
+
+After initial bootstrap, cluster members agree on the cluster version. Every 5 seconds, leader checks versions of all members and picks lowers minor version.
+New members will refuse joining cluster with cluster version newer than theirs, thus preventing cluster from downgrading.
+Downgrade commands allow cluster administrator to force cluster version to be lowered to previous minor version, thus allowing to downgrade the cluster.
+
+Downgrade should be executed in stages:
+1. Verify that cluster is ready to be downgraded by running `etcdctl downgrade validate <TARGET_VERSION>`
+2. Start the downgrade process by running `etcdctl downgrade enable <TARGET_VERSION>`
+3. For each cluster member:
+   1. Ensure that member is ready for downgrade by confirming that it wrote `The server is ready to downgrade` log.
+   2. Replace member binary with one with older version.
+   3. Confirm that member has correctly started and joined the cluster.
+4. Ensure that downgrade process has succeeded by checking leader log for `the cluster has been downgraded`
+
+Downgrade can be canceled by running `etcdctl downgrade cancel` command.
+
+In case of downgrade being canceled, cluster version will return to its normal behavior (pick the lowest member minor version).
+If no members were downgraded, cluster version will return to original value.
+If at least one member was downgraded, cluster version will stay at the `<TARGET_VALUE>` until downgraded members are upgraded back.
+
+### DOWNGRADE VALIDATE \<TARGET_VERSION\>
+
+DOWNGRADE VALIDATE validate downgrade capability before starting downgrade.
+
+#### Example
+
+```bash
+./etcdctl downgrade validate 3.5
+Downgrade validate success, cluster version 3.6
+
+./etcdctl downgrade validate 3.4
+Error: etcdserver: invalid downgrade target version
+
+```
+
+### DOWNGRADE ENABLE \<TARGET_VERSION\>
+
+DOWNGRADE ENABLE starts a downgrade action to cluster.
+
+#### Example
+
+```bash
+./etcdctl downgrade enable 3.5
+Downgrade enable success, cluster version 3.6
+```
+
+### DOWNGRADE CANCEL \<TARGET_VERSION\>
+
+DOWNGRADE CANCEL cancels the ongoing downgrade action to cluster.
+
+#### Example
+
+```bash
+./etcdctl downgrade cancel
+Downgrade cancel success, cluster version 3.5
 ```
 
 ## Concurrency commands
@@ -1495,54 +1480,6 @@ The approximate total number of keys transferred to the destination cluster, upd
 
 [mirror]: ./doc/mirror_maker.md
 
-### MIGRATE [options]
-
-Migrates keys in a v2 store to a v3 mvcc store. Users should run migration command for all members in the cluster.
-
-#### Options
-
-- data-dir -- Path to the data directory
-
-- wal-dir -- Path to the WAL directory
-
-- transformer -- Path to the user-provided transformer program (default if not provided)
-
-#### Output
-
-No output on success.
-
-#### Default transformer
-
-If user does not provide a transformer program, migrate command will use the default transformer. The default transformer transforms `storev2` formatted keys into `mvcc` formatted keys according to the following Go program:
-
-```go
-func transform(n *storev2.Node) *mvccpb.KeyValue {
-	if n.Dir {
-		return nil
-	}
-	kv := &mvccpb.KeyValue{
-		Key:            []byte(n.Key),
-		Value:          []byte(n.Value),
-		CreateRevision: int64(n.CreatedIndex),
-		ModRevision:    int64(n.ModifiedIndex),
-		Version:        1,
-	}
-	return kv
-}
-```
-
-#### User-provided transformer
-
-Users can provide a customized 1:n transformer function that transforms a key from the v2 store to any number of keys in the mvcc store. The migration program writes JSON formatted [v2 store keys][v2key] to the transformer program's stdin, reads protobuf formatted [mvcc keys][v3key] back from the transformer program's stdout, and finishes migration by saving the transformed keys into the mvcc store.
-
-The provided transformer should read until EOF and flush the stdout before exiting to ensure data integrity.
-
-#### Example
-
-```
-./etcdctl migrate --data-dir=/var/etcd --transformer=k8s-transformer
-# finished transforming keys
-```
 
 ### VERSION
 

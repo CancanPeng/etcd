@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"go.etcd.io/etcd/pkg/v3/testutil"
+	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
@@ -860,6 +860,7 @@ func TestNodeProposeAddLearnerNode(t *testing.T) {
 	<-applyConfChan
 	close(stop)
 	<-done
+	n.Stop()
 }
 
 func TestAppendPagination(t *testing.T) {
@@ -945,6 +946,7 @@ func TestCommitPagination(t *testing.T) {
 	}
 	s.Append(rd.Entries)
 	n.Advance()
+	n.Stop()
 }
 
 type ignoreSizeHintMemStorage struct {

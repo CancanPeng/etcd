@@ -16,13 +16,13 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
-	"go.etcd.io/etcd/pkg/v3/transport"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
 
 	"go.uber.org/zap"
 )
@@ -38,7 +38,7 @@ func fetchMetrics(ep string) (lines []string, err error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	b, rerr := ioutil.ReadAll(resp.Body)
+	b, rerr := io.ReadAll(resp.Body)
 	if rerr != nil {
 		return nil, rerr
 	}

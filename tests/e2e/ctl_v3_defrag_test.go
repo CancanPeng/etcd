@@ -14,9 +14,15 @@
 
 package e2e
 
-import "testing"
+import (
+	"testing"
 
-func TestCtlV3Defrag(t *testing.T) { testCtl(t, defragTest) }
+	"go.etcd.io/etcd/tests/v3/framework/e2e"
+)
+
+func TestCtlV3DefragOffline(t *testing.T) {
+	testCtlWithOffline(t, maintenanceInitKeys, defragOfflineTest)
+}
 
 func maintenanceInitKeys(cx ctlCtx) {
 	var kvs = []kv{{"key", "val1"}, {"key", "val2"}, {"key", "val3"}}
@@ -27,23 +33,23 @@ func maintenanceInitKeys(cx ctlCtx) {
 	}
 }
 
-func defragTest(cx ctlCtx) {
-	maintenanceInitKeys(cx)
-
-	if err := ctlV3Compact(cx, 4, cx.compactPhysical); err != nil {
-		cx.t.Fatal(err)
-	}
-
-	if err := ctlV3Defrag(cx); err != nil {
-		cx.t.Fatalf("defragTest ctlV3Defrag error (%v)", err)
-	}
-}
-
-func ctlV3Defrag(cx ctlCtx) error {
+func ctlV3OnlineDefrag(cx ctlCtx) error {
 	cmdArgs := append(cx.PrefixArgs(), "defrag")
-	lines := make([]string, cx.epc.cfg.clusterSize)
+	lines := make([]string, cx.epc.Cfg.ClusterSize)
 	for i := range lines {
 		lines[i] = "Finished defragmenting etcd member"
 	}
-	return spawnWithExpects(cmdArgs, lines...)
+	return e2e.SpawnWithExpects(cmdArgs, cx.envMap, lines...)
+}
+
+func ctlV3OfflineDefrag(cx ctlCtx) error {
+	cmdArgs := append(cx.PrefixArgsUtl(), "defrag", "--data-dir", cx.dataDir)
+	lines := []string{"finished defragmenting directory"}
+	return e2e.SpawnWithExpects(cmdArgs, cx.envMap, lines...)
+}
+
+func defragOfflineTest(cx ctlCtx) {
+	if err := ctlV3OfflineDefrag(cx); err != nil {
+		cx.t.Fatalf("defragTest ctlV3Defrag error (%v)", err)
+	}
 }

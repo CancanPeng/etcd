@@ -20,8 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"go.etcd.io/etcd/pkg/v3/testutil"
-	"go.etcd.io/etcd/pkg/v3/transport"
+	"go.etcd.io/etcd/client/pkg/v3/testutil"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 // Infrastructure to provision a single shared cluster for tests - only
@@ -42,7 +43,7 @@ type LazyCluster interface {
 	EndpointsV3() []string
 
 	// Cluster - calls to this method might initialize the cluster.
-	Cluster() *ClusterV3
+	Cluster() *integration.Cluster
 
 	// Transport - call to this method might initialize the cluster.
 	Transport() *http.Transport
@@ -53,8 +54,8 @@ type LazyCluster interface {
 }
 
 type lazyCluster struct {
-	cfg       ClusterConfig
-	cluster   *ClusterV3
+	cfg       integration.ClusterConfig
+	cluster   *integration.Cluster
 	transport *http.Transport
 	once      sync.Once
 	tb        testutil.TB
@@ -64,24 +65,26 @@ type lazyCluster struct {
 // NewLazyCluster returns a new test cluster handler that gets created on the
 // first call to GetEndpoints() or GetTransport()
 func NewLazyCluster() LazyCluster {
-	return NewLazyClusterWithConfig(ClusterConfig{Size: 1})
+	return NewLazyClusterWithConfig(integration.ClusterConfig{Size: 1})
 }
 
 // NewLazyClusterWithConfig returns a new test cluster handler that gets created
 // on the first call to GetEndpoints() or GetTransport()
-func NewLazyClusterWithConfig(cfg ClusterConfig) LazyCluster {
+func NewLazyClusterWithConfig(cfg integration.ClusterConfig) LazyCluster {
 	tb, closer := testutil.NewTestingTBProthesis("lazy_cluster")
 	return &lazyCluster{cfg: cfg, tb: tb, closer: closer}
 }
 
 func (lc *lazyCluster) mustLazyInit() {
 	lc.once.Do(func() {
+		lc.tb.Logf("LazyIniting ...")
 		var err error
 		lc.transport, err = transport.NewTransport(transport.TLSInfo{}, time.Second)
 		if err != nil {
 			log.Fatal(err)
 		}
-		lc.cluster = NewClusterV3(lc.tb, &lc.cfg)
+		lc.cluster = integration.NewCluster(lc.tb, &lc.cfg)
+		lc.tb.Logf("LazyIniting [Done]")
 	})
 }
 
@@ -105,7 +108,7 @@ func (lc *lazyCluster) EndpointsV3() []string {
 	return lc.Cluster().Client(0).Endpoints()
 }
 
-func (lc *lazyCluster) Cluster() *ClusterV3 {
+func (lc *lazyCluster) Cluster() *integration.Cluster {
 	lc.mustLazyInit()
 	return lc.cluster
 }

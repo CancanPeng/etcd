@@ -19,15 +19,15 @@ import (
 	"testing"
 	"time"
 
-	"go.etcd.io/etcd/pkg/v3/testutil"
+	"go.etcd.io/etcd/client/pkg/v3/testutil"
 )
 
 func TestTxnPanics(t *testing.T) {
-	testutil.BeforeTest(t)
+	testutil.RegisterLeakDetection(t)
 
 	kv := &kv{}
 
-	errc := make(chan string, 1)
+	errc := make(chan string, 6)
 	df := func() {
 		if s := recover(); s != nil {
 			errc <- s.(string)
