@@ -1,7 +1,22 @@
+// Copyright 2022 The etcd Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package version
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -10,12 +25,6 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/etcd/api/v3/version"
-)
-
-var (
-	V3_0 = semver.Version{Major: 3, Minor: 0}
-	V3_5 = semver.Version{Major: 3, Minor: 5}
-	V3_6 = semver.Version{Major: 3, Minor: 6}
 )
 
 func TestMemberMinimalVersion(t *testing.T) {
@@ -69,25 +78,25 @@ func TestDecideStorageVersion(t *testing.T) {
 		},
 		{
 			name:                 "Should set storage version if cluster version is set",
-			clusterVersion:       &V3_5,
-			expectStorageVersion: &V3_5,
+			clusterVersion:       &version.V3_5,
+			expectStorageVersion: &version.V3_5,
 		},
 		{
 			name:                 "No action if storage version was already set",
-			storageVersion:       &V3_5,
-			expectStorageVersion: &V3_5,
+			storageVersion:       &version.V3_5,
+			expectStorageVersion: &version.V3_5,
 		},
 		{
 			name:                 "No action if storage version equals cluster version",
-			clusterVersion:       &V3_5,
-			storageVersion:       &V3_5,
-			expectStorageVersion: &V3_5,
+			clusterVersion:       &version.V3_5,
+			storageVersion:       &version.V3_5,
+			expectStorageVersion: &version.V3_5,
 		},
 		{
 			name:                 "Should set storage version to cluster version",
-			clusterVersion:       &V3_6,
-			storageVersion:       &V3_5,
-			expectStorageVersion: &V3_6,
+			clusterVersion:       &version.V3_6,
+			storageVersion:       &version.V3_5,
+			expectStorageVersion: &version.V3_6,
 		},
 	}
 
@@ -165,74 +174,93 @@ func TestUpdateClusterVersionIfNeeded(t *testing.T) {
 		memberVersions       map[string]*version.Versions
 		downgrade            *DowngradeInfo
 		expectClusterVersion *semver.Version
+		expectError          error
 	}{
 		{
 			name:                 "Default to 3.0 if there are no members",
-			expectClusterVersion: &V3_0,
+			expectClusterVersion: &version.V3_0,
 		},
 		{
 			name: "Should pick lowest server version from members",
 			memberVersions: map[string]*version.Versions{
-				"a": {Cluster: "3.7.0", Server: "3.6.0"},
-				"b": {Cluster: "3.4.0", Server: "3.5.0"},
+				"a": {Server: "3.6.0"},
+				"b": {Server: "3.5.0"},
 			},
-			expectClusterVersion: &V3_5,
+			expectClusterVersion: &version.V3_5,
+		},
+		{
+			name: "Should support not full releases",
+			memberVersions: map[string]*version.Versions{
+				"b": {Server: "3.5.0-alpha.0"},
+			},
+			expectClusterVersion: &version.V3_5,
 		},
 		{
 			name: "Sets minimal version when member has broken version",
 			memberVersions: map[string]*version.Versions{
-				"a": {Cluster: "3.7.0", Server: "3.6.0"},
-				"b": {Cluster: "xxxx", Server: "yyyy"},
+				"a": {Server: "3.6.0"},
+				"b": {Server: "yyyy"},
 			},
-			expectClusterVersion: &V3_0,
+			expectClusterVersion: &version.V3_0,
 		},
 		{
-			name: "Should pick lowest server version from members (cv already set)",
+			name: "Should not downgrade cluster version without explicit downgrade request",
 			memberVersions: map[string]*version.Versions{
-				"a": {Cluster: "3.7.0", Server: "3.6.0"},
-				"b": {Cluster: "3.4.0", Server: "3.5.0"},
+				"a": {Server: "3.5.0"},
+				"b": {Server: "3.6.0"},
 			},
-			clusterVersion:       &V3_5,
-			expectClusterVersion: &V3_5,
+			clusterVersion:       &version.V3_6,
+			expectClusterVersion: &version.V3_6,
+		},
+		{
+			name: "Should not upgrade cluster version if there is still member old member",
+			memberVersions: map[string]*version.Versions{
+				"a": {Server: "3.5.0"},
+				"b": {Server: "3.6.0"},
+			},
+			clusterVersion:       &version.V3_5,
+			expectClusterVersion: &version.V3_5,
 		},
 		{
 			name: "Should upgrade cluster version if all members have upgraded (have higher server version)",
 			memberVersions: map[string]*version.Versions{
-				"a": {Cluster: "3.5.0", Server: "3.6.0"},
-				"b": {Cluster: "3.5.0", Server: "3.6.0"},
+				"a": {Server: "3.6.0"},
+				"b": {Server: "3.6.0"},
 			},
-			clusterVersion:       &V3_5,
-			expectClusterVersion: &V3_6,
+			clusterVersion:       &version.V3_5,
+			expectClusterVersion: &version.V3_6,
 		},
 		{
 			name: "Should downgrade cluster version if downgrade is set to allow older members to join",
 			memberVersions: map[string]*version.Versions{
-				"a": {Cluster: "3.6.0", Server: "3.6.0"},
-				"b": {Cluster: "3.6.0", Server: "3.6.0"},
+				"a": {Server: "3.6.0"},
+				"b": {Server: "3.6.0"},
 			},
-			clusterVersion:       &V3_6,
+			clusterVersion:       &version.V3_6,
 			downgrade:            &DowngradeInfo{TargetVersion: "3.5.0", Enabled: true},
-			expectClusterVersion: &V3_5,
-		},
-		{
-			name: "Should maintain downgrade target version to allow older members to join",
-			memberVersions: map[string]*version.Versions{
-				"a": {Cluster: "3.5.0", Server: "3.6.0"},
-				"b": {Cluster: "3.5.0", Server: "3.6.0"},
-			},
-			clusterVersion:       &V3_5,
-			downgrade:            &DowngradeInfo{TargetVersion: "3.5.0", Enabled: true},
-			expectClusterVersion: &V3_5,
+			expectClusterVersion: &version.V3_5,
 		},
 		{
 			name: "Don't downgrade below supported range",
 			memberVersions: map[string]*version.Versions{
-				"a": {Cluster: "3.5.0", Server: "3.6.0"},
-				"b": {Cluster: "3.5.0", Server: "3.6.0"},
+				"a": {Server: "3.6.0"},
+				"b": {Server: "3.6.0"},
 			},
-			clusterVersion:       &V3_5,
+			clusterVersion:       &version.V3_5,
 			downgrade:            &DowngradeInfo{TargetVersion: "3.4.0", Enabled: true},
-			expectClusterVersion: &V3_5,
+			expectClusterVersion: &version.V3_5,
+			expectError:          fmt.Errorf("invalid downgrade target"),
+		},
+		{
+			name: "Don't downgrade above cluster version",
+			memberVersions: map[string]*version.Versions{
+				"a": {Server: "3.5.0"},
+				"b": {Server: "3.5.0"},
+			},
+			clusterVersion:       &version.V3_5,
+			downgrade:            &DowngradeInfo{TargetVersion: "3.6.0", Enabled: true},
+			expectClusterVersion: &version.V3_5,
+			expectError:          fmt.Errorf("invalid downgrade target"),
 		},
 	}
 
@@ -245,11 +273,14 @@ func TestUpdateClusterVersionIfNeeded(t *testing.T) {
 			}
 			monitor := NewMonitor(zaptest.NewLogger(t), s)
 
-			// Run multiple times to ensure that results are stable
-			for i := 0; i < 3; i++ {
-				monitor.UpdateClusterVersionIfNeeded()
-				assert.Equal(t, tt.expectClusterVersion, s.clusterVersion)
-			}
+			err := monitor.UpdateClusterVersionIfNeeded()
+			assert.Equal(t, tt.expectClusterVersion, s.clusterVersion)
+			assert.Equal(t, tt.expectError, err)
+
+			// Ensure results are stable
+			newVersion, err := monitor.decideClusterVersion()
+			assert.Nil(t, newVersion)
+			assert.Equal(t, tt.expectError, err)
 		})
 	}
 }
@@ -335,25 +366,25 @@ func TestUpdateStorageVersionIfNeeded(t *testing.T) {
 		},
 		{
 			name:                 "Should set storage version if cluster version is set",
-			clusterVersion:       &V3_5,
-			expectStorageVersion: &V3_5,
+			clusterVersion:       &version.V3_5,
+			expectStorageVersion: &version.V3_5,
 		},
 		{
 			name:                 "No action if storage version was already set",
-			storageVersion:       &V3_5,
-			expectStorageVersion: &V3_5,
+			storageVersion:       &version.V3_5,
+			expectStorageVersion: &version.V3_5,
 		},
 		{
 			name:                 "No action if storage version equals cluster version",
-			clusterVersion:       &V3_5,
-			storageVersion:       &V3_5,
-			expectStorageVersion: &V3_5,
+			clusterVersion:       &version.V3_5,
+			storageVersion:       &version.V3_5,
+			expectStorageVersion: &version.V3_5,
 		},
 		{
 			name:                 "Should set storage version to cluster version",
-			clusterVersion:       &V3_6,
-			storageVersion:       &V3_5,
-			expectStorageVersion: &V3_6,
+			clusterVersion:       &version.V3_6,
+			storageVersion:       &version.V3_5,
+			expectStorageVersion: &version.V3_6,
 		},
 	}
 
@@ -379,7 +410,6 @@ type storageMock struct {
 	clusterVersion *semver.Version
 	storageVersion *semver.Version
 	downgradeInfo  *DowngradeInfo
-	locked         bool
 }
 
 var _ Server = (*storageMock)(nil)

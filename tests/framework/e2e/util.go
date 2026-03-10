@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -27,7 +28,7 @@ import (
 	"go.etcd.io/etcd/pkg/v3/expect"
 )
 
-func WaitReadyExpectProc(exproc *expect.ExpectProcess, readyStrs []string) error {
+func WaitReadyExpectProc(ctx context.Context, exproc *expect.ExpectProcess, readyStrs []string) error {
 	matchSet := func(l string) bool {
 		for _, s := range readyStrs {
 			if strings.Contains(l, s) {
@@ -36,54 +37,78 @@ func WaitReadyExpectProc(exproc *expect.ExpectProcess, readyStrs []string) error
 		}
 		return false
 	}
-	_, err := exproc.ExpectFunc(matchSet)
+	_, err := exproc.ExpectFunc(ctx, matchSet)
 	return err
 }
 
-func SpawnWithExpect(args []string, expected string) error {
-	return SpawnWithExpects(args, nil, []string{expected}...)
+func SpawnWithExpect(args []string, expected expect.ExpectedResponse) error {
+	return SpawnWithExpects(args, nil, []expect.ExpectedResponse{expected}...)
 }
 
-func SpawnWithExpectWithEnv(args []string, envVars map[string]string, expected string) error {
-	return SpawnWithExpects(args, envVars, []string{expected}...)
+func SpawnWithExpectWithEnv(args []string, envVars map[string]string, expected expect.ExpectedResponse) error {
+	return SpawnWithExpects(args, envVars, []expect.ExpectedResponse{expected}...)
 }
 
-func SpawnWithExpects(args []string, envVars map[string]string, xs ...string) error {
-	_, err := SpawnWithExpectLines(args, envVars, xs...)
+func SpawnWithExpects(args []string, envVars map[string]string, xs ...expect.ExpectedResponse) error {
+	return SpawnWithExpectsContext(context.TODO(), args, envVars, xs...)
+}
+
+func SpawnWithExpectsContext(ctx context.Context, args []string, envVars map[string]string, xs ...expect.ExpectedResponse) error {
+	_, err := SpawnWithExpectLines(ctx, args, envVars, xs...)
 	return err
 }
 
-func SpawnWithExpectLines(args []string, envVars map[string]string, xs ...string) ([]string, error) {
+func SpawnWithExpectLines(ctx context.Context, args []string, envVars map[string]string, xs ...expect.ExpectedResponse) ([]string, error) {
 	proc, err := SpawnCmd(args, envVars)
 	if err != nil {
 		return nil, err
 	}
+	defer proc.Close()
 	// process until either stdout or stderr contains
 	// the expected string
 	var (
 		lines []string
 	)
 	for _, txt := range xs {
-		l, lerr := proc.Expect(txt)
+		l, lerr := proc.ExpectWithContext(ctx, txt)
 		if lerr != nil {
 			proc.Close()
-			return nil, fmt.Errorf("%v %v (expected %q, got %q). Try EXPECT_DEBUG=TRUE", args, lerr, txt, lines)
+			return nil, fmt.Errorf("%v %w (expected %q, got %q). Try EXPECT_DEBUG=TRUE", args, lerr, txt.Value, lines)
 		}
 		lines = append(lines, l)
 	}
 	perr := proc.Close()
-	l := proc.LineCount()
-	if len(xs) == 0 && l != noOutputLineCount { // expect no output
-		return nil, fmt.Errorf("unexpected output from %v (got lines %q, line count %d) %v. Try EXPECT_DEBUG=TRUE", args, lines, l, l != noOutputLineCount)
+	if perr != nil {
+		return lines, fmt.Errorf("err: %w, with output lines %v", perr, proc.Lines())
 	}
-	return lines, perr
+
+	l := proc.LineCount()
+	if len(xs) == 0 && l != 0 { // expect no output
+		return nil, fmt.Errorf("unexpected output from %v (got lines %q, line count %d). Try EXPECT_DEBUG=TRUE", args, lines, l)
+	}
+	return lines, nil
+}
+
+func RunUtilCompletion(args []string, envVars map[string]string) ([]string, error) {
+	proc, err := SpawnCmd(args, envVars)
+	if err != nil {
+		return nil, fmt.Errorf("failed to spawn command %v with error: %w", args, err)
+	}
+
+	proc.Wait()
+	err = proc.Close()
+	if err != nil {
+		return nil, fmt.Errorf("failed to close command %v with error: %w", args, err)
+	}
+
+	return proc.Lines(), nil
 }
 
 func RandomLeaseID() int64 {
 	return rand.New(rand.NewSource(time.Now().UnixNano())).Int63()
 }
 
-func DataMarshal(data interface{}) (d string, e error) {
+func DataMarshal(data any) (d string, e error) {
 	m, err := json.Marshal(data)
 	if err != nil {
 		return "", err
@@ -105,12 +130,28 @@ func CloseWithTimeout(p *expect.ExpectProcess, d time.Duration) error {
 	return fmt.Errorf("took longer than %v to Close process %+v", d, p)
 }
 
-func ToTLS(s string) string {
-	return strings.Replace(s, "http://", "https://", 1)
+func setupScheme(s string, isTLS bool) string {
+	if s == "" {
+		s = "http"
+	}
+	if isTLS {
+		s = ToTLS(s)
+	}
+	return s
 }
 
-func SkipInShortMode(t testing.TB) {
-	testutil.SkipTestIfShortMode(t, "e2e tests are not running in --short mode")
+func ToTLS(s string) string {
+	if strings.Contains(s, "http") && !strings.Contains(s, "https") {
+		return strings.Replace(s, "http", "https", 1)
+	}
+	if strings.Contains(s, "unix") && !strings.Contains(s, "unixs") {
+		return strings.Replace(s, "unix", "unixs", 1)
+	}
+	return s
+}
+
+func SkipInShortMode(tb testing.TB) {
+	testutil.SkipTestIfShortMode(tb, "e2e tests are not running in --short mode")
 }
 
 func mergeEnvVariables(envVars map[string]string) []string {
@@ -125,6 +166,10 @@ func mergeEnvVariables(envVars map[string]string) []string {
 	currVars := os.Environ()
 	for _, v := range currVars {
 		p := strings.Split(v, "=")
+		// TODO: Remove PATH when we stop using system binaries (`awk`, `echo`)
+		if !strings.HasPrefix(p[0], "ETCD_") && !strings.HasPrefix(p[0], "ETCDCTL_") && !strings.HasPrefix(p[0], "EXPECT_") && p[0] != "PATH" {
+			continue
+		}
 		if _, ok := envVars[p[0]]; !ok {
 			env = append(env, fmt.Sprintf("%s=%s", p[0], p[1]))
 		}

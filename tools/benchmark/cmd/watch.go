@@ -23,12 +23,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/pkg/v3/report"
-
+	"github.com/cheggaaa/pb/v3"
 	"github.com/spf13/cobra"
 	"golang.org/x/time/rate"
-	"gopkg.in/cheggaaa/pb.v1"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/pkg/v3/report"
 )
 
 // watchCmd represents the watch command
@@ -88,7 +88,7 @@ func init() {
 	watchCmd.Flags().BoolVar(&watchSeqKeys, "sequential-keys", false, "Use sequential keys")
 }
 
-func watchFunc(cmd *cobra.Command, args []string) {
+func watchFunc(_ *cobra.Command, _ []string) {
 	if watchKeySpaceSize <= 0 {
 		fmt.Fprintf(os.Stderr, "expected positive --key-space-size, got (%v)", watchKeySpaceSize)
 		os.Exit(1)
@@ -115,10 +115,9 @@ func benchMakeWatches(clients []*clientv3.Client, wk *watchedKeys) {
 
 	keyc := make(chan string, watchStreams)
 	bar = pb.New(watchStreams * watchWatchesPerStream)
-	bar.Format("Bom !")
 	bar.Start()
 
-	r := newReport()
+	r := newReport("watch-make")
 	rch := r.Results()
 
 	wg.Add(len(streams) + 1)
@@ -188,10 +187,9 @@ func benchPutWatches(clients []*clientv3.Client, wk *watchedKeys) {
 	}
 
 	bar = pb.New(eventsTotal)
-	bar.Format("Bom !")
 	bar.Start()
 
-	r := newReport()
+	r := newReport("watch-put")
 
 	wg.Add(len(wk.watches))
 	nrRxed := int32(eventsTotal)
@@ -211,7 +209,12 @@ func benchPutWatches(clients []*clientv3.Client, wk *watchedKeys) {
 		}
 	}()
 
-	limit := rate.NewLimiter(rate.Limit(watchPutRate), 1)
+	watchPutLimit := rate.Inf
+	if watchPutRate > 0 {
+		watchPutLimit = rate.Limit(watchPutRate)
+	}
+
+	limit := rate.NewLimiter(watchPutLimit, 1)
 	for _, cc := range clients {
 		go func(c *clientv3.Client) {
 			for op := range putreqc {
@@ -230,7 +233,6 @@ func benchPutWatches(clients []*clientv3.Client, wk *watchedKeys) {
 	bar.Finish()
 	close(r.Results())
 	fmt.Printf("Watch events received summary:\n%s", <-rc)
-
 }
 
 func recvWatchChan(wch clientv3.WatchChan, results chan<- report.Result, nrRxed *int32) {

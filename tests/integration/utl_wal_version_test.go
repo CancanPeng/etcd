@@ -21,7 +21,7 @@ import (
 
 	"github.com/coreos/go-semver/semver"
 	"github.com/stretchr/testify/assert"
-	"go.etcd.io/etcd/tests/v3/framework/integration"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
@@ -29,6 +29,8 @@ import (
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.etcd.io/etcd/server/v3/storage/wal"
 	"go.etcd.io/etcd/server/v3/storage/wal/walpb"
+	framecfg "go.etcd.io/etcd/tests/v3/framework/config"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 func TestEtcdVersionFromWAL(t *testing.T) {
@@ -36,37 +38,65 @@ func TestEtcdVersionFromWAL(t *testing.T) {
 		"Wal creation tests are depending on embedded etcd server so are integration-level tests.")
 	cfg := integration.NewEmbedConfig(t, "default")
 	srv, err := embed.StartEtcd(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	select {
 	case <-srv.Server.ReadyNotify():
 	case <-time.After(3 * time.Second):
 		t.Fatalf("failed to start embed.Etcd for test")
 	}
 
-	ccfg := clientv3.Config{Endpoints: []string{cfg.ACUrls[0].String()}}
+	// When the member becomes leader, it will update the cluster version
+	// with the cluster's minimum version. As it's updated asynchronously,
+	// it could not be updated in time before close. Wait for it to become
+	// ready.
+	if err = waitForClusterVersionReady(srv); err != nil {
+		srv.Close()
+		t.Fatalf("failed to wait for cluster version to become ready: %v", err)
+	}
+
+	ccfg := clientv3.Config{Endpoints: []string{cfg.AdvertiseClientUrls[0].String()}}
 	cli, err := integration.NewClient(t, ccfg)
 	if err != nil {
 		srv.Close()
 		t.Fatal(err)
 	}
-	// Get auth status to increase etcd version of proto stored in wal
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.RequestTimeout)
-	cli.AuthStatus(ctx)
+
+	// Once the cluster version has been updated, any entity's storage
+	// version should be align with cluster version.
+	ctx, cancel := context.WithTimeout(t.Context(), testutil.RequestTimeout)
+	_, err = cli.AuthStatus(ctx)
 	cancel()
+	if err != nil {
+		srv.Close()
+		t.Fatalf("failed to get auth status: %v", err)
+	}
 
 	cli.Close()
 	srv.Close()
 
 	w, err := wal.Open(zap.NewNop(), cfg.Dir+"/member/wal", walpb.Snapshot{})
-	if err != nil {
-		panic(err)
-	}
+	require.NoError(t, err)
 	defer w.Close()
+
 	walVersion, err := wal.ReadWALVersion(w)
-	if err != nil {
-		t.Fatal(err)
+	require.NoError(t, err)
+	assert.Equal(t, &semver.Version{Major: 3, Minor: 5}, walVersion.MinimalEtcdVersion())
+}
+
+func waitForClusterVersionReady(srv *embed.Etcd) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if srv.Server.ClusterVersion() != nil {
+			return nil
+		}
+		time.Sleep(framecfg.TickDuration)
 	}
-	assert.Equal(t, &semver.Version{Major: 3, Minor: 6}, walVersion.MinimalEtcdVersion())
 }

@@ -22,11 +22,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
-
-	"github.com/spf13/cobra"
 )
 
 var txnInteractive bool
@@ -36,7 +36,31 @@ func NewTxnCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "txn [options]",
 		Short: "Txn processes all the requests in one transaction",
-		Run:   txnCommandFunc,
+		Long: `Txn reads multiple etcd requests from standard input and applies them as a single atomic transaction.
+
+A transaction consists of three components:
+1) a list of conditions,
+2) a list of requests to apply if all the conditions are true,
+3) a list of requests to apply if any condition is false.
+
+Example interactive stdin usage:
+
+---
+etcdctl txn -i
+# compares:
+mod("key1") > "0"
+
+# success requests (get, put, delete):
+put key1 "overwrote-key1"
+
+# failure requests (get, put, delete):
+put key1 "created-key1"
+put key2 "some extra key"
+---
+
+Refer to https://github.com/etcd-io/etcd/blob/main/etcdctl/README.md#txn-options.`,
+		Run:     txnCommandFunc,
+		GroupID: groupKVID,
 	}
 	cmd.Flags().BoolVarP(&txnInteractive, "interactive", "i", false, "Input transaction in interactive mode")
 	return cmd
@@ -127,16 +151,19 @@ func parseRequestUnion(line string) (*clientv3.Op, error) {
 	opc := make(chan clientv3.Op, 1)
 
 	put := NewPutCommand()
+	put.GroupID = ""
 	put.Run = func(cmd *cobra.Command, args []string) {
 		key, value, opts := getPutOp(args)
 		opc <- clientv3.OpPut(key, value, opts...)
 	}
 	get := NewGetCommand()
+	get.GroupID = ""
 	get.Run = func(cmd *cobra.Command, args []string) {
 		key, opts := getGetOp(args)
 		opc <- clientv3.OpGet(key, opts...)
 	}
 	del := NewDelCommand()
+	del.GroupID = ""
 	del.Run = func(cmd *cobra.Command, args []string) {
 		key, opts := getDelOp(args)
 		opc <- clientv3.OpDelete(key, opts...)
@@ -171,7 +198,7 @@ func ParseCompare(line string) (*clientv3.Cmp, error) {
 		return nil, fmt.Errorf("malformed comparison: %s; got %s(%q) %s %q", line, target, key, op, val)
 	}
 	if serr != nil {
-		return nil, fmt.Errorf("malformed comparison: %s (%v)", line, serr)
+		return nil, fmt.Errorf("malformed comparison: %s (%w)", line, serr)
 	}
 
 	var (

@@ -21,7 +21,9 @@ import (
 	"strconv"
 	"testing"
 
-	"go.etcd.io/etcd/client/pkg/v3/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	v3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
 	"go.etcd.io/etcd/tests/v3/framework/integration"
@@ -38,7 +40,7 @@ func TestSTMConflict(t *testing.T) {
 	keys := make([]string, 5)
 	for i := 0; i < len(keys); i++ {
 		keys[i] = fmt.Sprintf("foo-%d", i)
-		if _, err := etcdc.Put(context.TODO(), keys[i], "100"); err != nil {
+		if _, err := etcdc.Put(t.Context(), keys[i], "100"); err != nil {
 			t.Fatalf("could not make key (%v)", err)
 		}
 	}
@@ -47,7 +49,7 @@ func TestSTMConflict(t *testing.T) {
 	for i := range keys {
 		curEtcdc := clus.RandClient()
 		srcKey := keys[i]
-		applyf := func(stm concurrency.STM) error {
+		applyf := func(stm concurrency.STM) {
 			src := stm.Get(srcKey)
 			// must be different key to avoid double-adding
 			dstKey := srcKey
@@ -59,16 +61,21 @@ func TestSTMConflict(t *testing.T) {
 			dstV, _ := strconv.ParseInt(dst, 10, 64)
 			if srcV == 0 {
 				// can't rand.Intn on 0, so skip this transaction
-				return nil
+				return
 			}
 			xfer := int64(rand.Intn(int(srcV)) / 2)
 			stm.Put(srcKey, fmt.Sprintf("%d", srcV-xfer))
 			stm.Put(dstKey, fmt.Sprintf("%d", dstV+xfer))
-			return nil
 		}
 		go func() {
 			iso := concurrency.WithIsolation(concurrency.RepeatableReads)
-			_, err := concurrency.NewSTM(curEtcdc, applyf, iso)
+			_, err := concurrency.NewSTM(curEtcdc,
+				func(stm concurrency.STM) error {
+					applyf(stm)
+					return nil
+				},
+				iso,
+			)
 			errc <- err
 		}()
 	}
@@ -83,7 +90,7 @@ func TestSTMConflict(t *testing.T) {
 	// ensure sum matches initial sum
 	sum := 0
 	for _, oldkey := range keys {
-		rk, err := etcdc.Get(context.TODO(), oldkey)
+		rk, err := etcdc.Get(t.Context(), oldkey)
 		if err != nil {
 			t.Fatalf("couldn't fetch key %s (%v)", oldkey, err)
 		}
@@ -113,7 +120,7 @@ func TestSTMPutNewKey(t *testing.T) {
 		t.Fatalf("error on stm txn (%v)", err)
 	}
 
-	resp, err := etcdc.Get(context.TODO(), "foo")
+	resp, err := etcdc.Get(t.Context(), "foo")
 	if err != nil {
 		t.Fatalf("error fetching key (%v)", err)
 	}
@@ -130,7 +137,7 @@ func TestSTMAbort(t *testing.T) {
 	defer clus.Terminate(t)
 
 	etcdc := clus.RandClient()
-	ctx, cancel := context.WithCancel(context.TODO())
+	ctx, cancel := context.WithCancel(t.Context())
 	applyf := func(stm concurrency.STM) error {
 		stm.Put("foo", "baz")
 		cancel()
@@ -144,7 +151,7 @@ func TestSTMAbort(t *testing.T) {
 		t.Fatalf("no error on stm txn")
 	}
 
-	resp, err := etcdc.Get(context.TODO(), "foo")
+	resp, err := etcdc.Get(t.Context(), "foo")
 	if err != nil {
 		t.Fatalf("error fetching key (%v)", err)
 	}
@@ -174,11 +181,11 @@ func TestSTMSerialize(t *testing.T) {
 		defer close(updatec)
 		for i := 0; i < 5; i++ {
 			s := fmt.Sprintf("%d", i)
-			ops := []v3.Op{}
+			var ops []v3.Op
 			for _, k := range keys {
 				ops = append(ops, v3.OpPut(k, s))
 			}
-			if _, err := etcdc.Txn(context.TODO()).Then(ops...).Commit(); err != nil {
+			if _, err := etcdc.Txn(t.Context()).Then(ops...).Commit(); err != nil {
 				t.Errorf("couldn't put keys (%v)", err)
 			}
 			updatec <- struct{}{}
@@ -190,7 +197,7 @@ func TestSTMSerialize(t *testing.T) {
 	for range updatec {
 		curEtcdc := clus.RandClient()
 		applyf := func(stm concurrency.STM) error {
-			vs := []string{}
+			var vs []string
 			for i := range keys {
 				vs = append(vs, stm.Get(keys[i]))
 			}
@@ -224,15 +231,13 @@ func TestSTMApplyOnConcurrentDeletion(t *testing.T) {
 	defer clus.Terminate(t)
 
 	etcdc := clus.RandClient()
-	if _, err := etcdc.Put(context.TODO(), "foo", "bar"); err != nil {
-		t.Fatal(err)
-	}
+	_, err := etcdc.Put(t.Context(), "foo", "bar")
+	require.NoError(t, err)
 	donec, readyc := make(chan struct{}), make(chan struct{})
 	go func() {
 		<-readyc
-		if _, err := etcdc.Delete(context.TODO(), "foo"); err != nil {
-			t.Error(err)
-		}
+		_, derr := etcdc.Delete(t.Context(), "foo")
+		assert.NoError(t, derr)
 		close(donec)
 	}()
 
@@ -250,14 +255,14 @@ func TestSTMApplyOnConcurrentDeletion(t *testing.T) {
 	}
 
 	iso := concurrency.WithIsolation(concurrency.RepeatableReads)
-	if _, err := concurrency.NewSTM(etcdc, applyf, iso); err != nil {
-		t.Fatalf("error on stm txn (%v)", err)
-	}
+	_, err = concurrency.NewSTM(etcdc, applyf, iso)
+	require.NoErrorf(t, err, "error on stm txn")
+
 	if try != 2 {
 		t.Fatalf("STM apply expected to run twice, got %d", try)
 	}
 
-	resp, err := etcdc.Get(context.TODO(), "foo2")
+	resp, err := etcdc.Get(t.Context(), "foo2")
 	if err != nil {
 		t.Fatalf("error fetching key (%v)", err)
 	}
@@ -274,8 +279,8 @@ func TestSTMSerializableSnapshotPut(t *testing.T) {
 
 	cli := clus.Client(0)
 	// key with lower create/mod revision than keys being updated
-	_, err := cli.Put(context.TODO(), "a", "0")
-	testutil.AssertNil(t, err)
+	_, err := cli.Put(t.Context(), "a", "0")
+	require.NoError(t, err)
 
 	tries := 0
 	applyf := func(stm concurrency.STM) error {
@@ -290,12 +295,12 @@ func TestSTMSerializableSnapshotPut(t *testing.T) {
 
 	iso := concurrency.WithIsolation(concurrency.SerializableSnapshot)
 	_, err = concurrency.NewSTM(cli, applyf, iso)
-	testutil.AssertNil(t, err)
+	require.NoError(t, err)
 	_, err = concurrency.NewSTM(cli, applyf, iso)
-	testutil.AssertNil(t, err)
+	require.NoError(t, err)
 
-	resp, err := cli.Get(context.TODO(), "b")
-	testutil.AssertNil(t, err)
+	resp, err := cli.Get(t.Context(), "b")
+	require.NoError(t, err)
 	if resp.Kvs[0].Version != 2 {
 		t.Fatalf("bad version. got %+v, expected version 2", resp)
 	}

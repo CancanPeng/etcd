@@ -15,14 +15,16 @@
 package wal
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
 
+	"go.uber.org/zap"
+
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/server/v3/storage/wal/walpb"
-	"go.uber.org/zap"
 )
 
 // Repair tries to repair ErrUnexpectedEOF in the
@@ -40,32 +42,31 @@ func Repair(lg *zap.Logger, dirpath string) bool {
 	lg.Info("repairing", zap.String("path", f.Name()))
 
 	rec := &walpb.Record{}
-	decoder := newDecoder(f)
+	decoder := NewDecoder(fileutil.NewFileReader(f.File))
 	for {
-		lastOffset := decoder.lastOffset()
-		err := decoder.decode(rec)
-		switch err {
-		case nil:
+		lastOffset := decoder.LastOffset()
+		err := decoder.Decode(rec)
+		switch {
+		case err == nil:
 			// update crc of the decoder when necessary
-			switch rec.Type {
-			case crcType:
-				crc := decoder.crc.Sum32()
+			if rec.GetType() == CrcType {
+				crc := decoder.LastCRC()
 				// current crc of decoder must match the crc of the record.
 				// do no need to match 0 crc, since the decoder is a new one at this case.
 				if crc != 0 && rec.Validate(crc) != nil {
 					return false
 				}
-				decoder.updateCRC(rec.Crc)
+				decoder.UpdateCRC(rec.GetCrc())
 			}
 			continue
 
-		case io.EOF:
+		case errors.Is(err, io.EOF):
 			lg.Info("repaired", zap.String("path", f.Name()), zap.Error(io.EOF))
 			return true
 
-		case io.ErrUnexpectedEOF:
+		case errors.Is(err, io.ErrUnexpectedEOF):
 			brokenName := f.Name() + ".broken"
-			bf, bferr := os.Create(brokenName)
+			bf, bferr := createNewWALFile[*os.File](brokenName, true)
 			if bferr != nil {
 				lg.Warn("failed to create backup file", zap.String("path", brokenName), zap.Error(bferr))
 				return false

@@ -16,13 +16,16 @@ package backend
 
 import (
 	"bytes"
+	"errors"
 	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	bolt "go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
 type BucketID int
@@ -43,18 +46,28 @@ type Bucket interface {
 }
 
 type BatchTx interface {
-	ReadTx
-	UnsafeCreateBucket(bucket Bucket)
-	UnsafeDeleteBucket(bucket Bucket)
-	UnsafePut(bucket Bucket, key []byte, value []byte)
-	UnsafeSeqPut(bucket Bucket, key []byte, value []byte)
-	UnsafeDelete(bucket Bucket, key []byte)
+	Lock()
+	Unlock()
 	// Commit commits a previous tx and begins a new writable one.
 	Commit()
 	// CommitAndStop commits the previous tx and does not create a new one.
 	CommitAndStop()
 	LockInsideApply()
 	LockOutsideApply()
+	UnsafeReadWriter
+}
+
+type UnsafeReadWriter interface {
+	UnsafeReader
+	UnsafeWriter
+}
+
+type UnsafeWriter interface {
+	UnsafeCreateBucket(bucket Bucket)
+	UnsafeDeleteBucket(bucket Bucket)
+	UnsafePut(bucket Bucket, key []byte, value []byte)
+	UnsafeSeqPut(bucket Bucket, key []byte, value []byte)
+	UnsafeDelete(bucket Bucket, key []byte)
 }
 
 type batchTx struct {
@@ -100,21 +113,8 @@ func (t *batchTx) Unlock() {
 	t.Mutex.Unlock()
 }
 
-// BatchTx interface embeds ReadTx interface. But RLock() and RUnlock() do not
-// have appropriate semantics in BatchTx interface. Therefore should not be called.
-// TODO: might want to decouple ReadTx and BatchTx
-
-func (t *batchTx) RLock() {
-	panic("unexpected RLock")
-}
-
-func (t *batchTx) RUnlock() {
-	panic("unexpected RUnlock")
-}
-
 func (t *batchTx) UnsafeCreateBucket(bucket Bucket) {
-	_, err := t.tx.CreateBucket(bucket.Name())
-	if err != nil && err != bolt.ErrBucketExists {
+	if _, err := t.tx.CreateBucketIfNotExists(bucket.Name()); err != nil {
 		t.backend.lg.Fatal(
 			"failed to create a bucket",
 			zap.Stringer("bucket-name", bucket),
@@ -126,7 +126,7 @@ func (t *batchTx) UnsafeCreateBucket(bucket Bucket) {
 
 func (t *batchTx) UnsafeDeleteBucket(bucket Bucket) {
 	err := t.tx.DeleteBucket(bucket.Name())
-	if err != nil && err != bolt.ErrBucketNotFound {
+	if err != nil && !errors.Is(err, bolterrors.ErrBucketNotFound) {
 		t.backend.lg.Fatal(
 			"failed to delete a bucket",
 			zap.Stringer("bucket-name", bucket),
@@ -289,7 +289,8 @@ func (t *batchTx) commit(stop bool) {
 
 type batchTxBuffered struct {
 	batchTx
-	buf txWriteBuffer
+	buf                     txWriteBuffer
+	pendingDeleteOperations int
 }
 
 func newBatchTxBuffered(backend *backend) *batchTxBuffered {
@@ -307,9 +308,31 @@ func newBatchTxBuffered(backend *backend) *batchTxBuffered {
 func (t *batchTxBuffered) Unlock() {
 	if t.pending != 0 {
 		t.backend.readTx.Lock() // blocks txReadBuffer for writing.
+		// gofail: var beforeWritebackBuf struct{}
 		t.buf.writeback(&t.backend.readTx.buf)
+		// gofail: var afterWritebackBuf struct{}
 		t.backend.readTx.Unlock()
-		if t.pending >= t.backend.batchLimit {
+		// We commit the transaction when the number of pending operations
+		// reaches the configured limit(batchLimit) to prevent it from
+		// becoming excessively large.
+		//
+		// But we also need to commit the transaction immediately if there
+		// is any pending deleting operation, otherwise etcd might run into
+		// a situation that it haven't finished committing the data into backend
+		// storage (note: etcd periodically commits the bbolt transactions
+		// instead of on each request) when it applies next request. Accordingly,
+		// etcd may still read the stale data from bbolt when processing next
+		// request. So it breaks the linearizability.
+		//
+		// Note we don't need to commit the transaction for put requests if
+		// it doesn't exceed the batch limit, because there is a buffer on top
+		// of the bbolt. Each time when etcd reads data from backend storage,
+		// it will read data from both bbolt and the buffer. But there is no
+		// such a buffer for delete requests.
+		//
+		// Please also refer to
+		// https://github.com/etcd-io/etcd/pull/17119#issuecomment-1857547158
+		if t.pending >= t.backend.batchLimit || t.pendingDeleteOperations > 0 {
 			t.commit(false)
 		}
 	}
@@ -329,10 +352,6 @@ func (t *batchTxBuffered) CommitAndStop() {
 }
 
 func (t *batchTxBuffered) commit(stop bool) {
-	if t.backend.hooks != nil {
-		t.backend.hooks.OnPreCommitUnsafe(t)
-	}
-
 	// all read txs must be closed to acquire boltdb commit rwlock
 	t.backend.readTx.Lock()
 	t.unsafeCommit(stop)
@@ -340,6 +359,12 @@ func (t *batchTxBuffered) commit(stop bool) {
 }
 
 func (t *batchTxBuffered) unsafeCommit(stop bool) {
+	if t.backend.hooks != nil {
+		// gofail: var commitBeforePreCommitHook struct{}
+		t.backend.hooks.OnPreCommitUnsafe(t)
+		// gofail: var commitAfterPreCommitHook struct{}
+	}
+
 	if t.backend.readTx.tx != nil {
 		// wait all store read transactions using the current boltdb tx to finish,
 		// then close the boltdb tx
@@ -353,6 +378,7 @@ func (t *batchTxBuffered) unsafeCommit(stop bool) {
 	}
 
 	t.batchTx.commit(stop)
+	t.pendingDeleteOperations = 0
 
 	if !stop {
 		t.backend.readTx.tx = t.backend.begin(false)
@@ -367,4 +393,14 @@ func (t *batchTxBuffered) UnsafePut(bucket Bucket, key []byte, value []byte) {
 func (t *batchTxBuffered) UnsafeSeqPut(bucket Bucket, key []byte, value []byte) {
 	t.batchTx.UnsafeSeqPut(bucket, key, value)
 	t.buf.putSeq(bucket, key, value)
+}
+
+func (t *batchTxBuffered) UnsafeDelete(bucketType Bucket, key []byte) {
+	t.batchTx.UnsafeDelete(bucketType, key)
+	t.pendingDeleteOperations++
+}
+
+func (t *batchTxBuffered) UnsafeDeleteBucket(bucket Bucket) {
+	t.batchTx.UnsafeDeleteBucket(bucket)
+	t.pendingDeleteOperations++
 }

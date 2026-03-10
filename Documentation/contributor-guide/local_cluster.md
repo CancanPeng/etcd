@@ -1,4 +1,4 @@
-# Set up local cluster
+# Set up the local cluster
 
 For testing and development deployments, the quickest and easiest way is to configure a local cluster. For a production deployment, refer to the [clustering][clustering] section.
 
@@ -28,7 +28,7 @@ Use `etcdctl` to interact with the running cluster:
       OK
     ```
 
-    If OK is printed, storing key-value pair is successful.
+    If OK is printed, storing the key-value pair is successful.
 
 2. Retrieve the value of `foo`:
 
@@ -48,8 +48,9 @@ A `Procfile` at the base of the etcd git repository is provided to easily config
 1. Install `goreman` to control Procfile-based applications:
 
     ```
-    $ go get github.com/mattn/goreman
+    $ go install github.com/mattn/goreman@latest
     ```
+   The installation will place executables in the $GOPATH/bin. If $GOPATH environment variable is not set, the tool will be installed into the $HOME/go/bin. Make sure that $PATH is set accordingly in your environment.
 
 2. Start a cluster with `goreman` using etcd's stock Procfile:
 
@@ -68,7 +69,7 @@ Use `etcdctl` to interact with the running cluster:
     ```
     $ etcdctl --write-out=table --endpoints=localhost:2379 member list
     ```
-    The list of etcd members are displayed as follows:
+    The list of etcd members is displayed as follows:
 
     ```
     +------------------+---------+--------+------------------------+------------------------+
@@ -87,7 +88,7 @@ Use `etcdctl` to interact with the running cluster:
     OK
     ```
 
-    If OK is printed, storing key-value pair is successful.
+    If OK is printed, storing the key-value pair is successful.
 
 ### Testing fault tolerance
 
@@ -143,7 +144,7 @@ To exercise etcd's fault tolerance, kill a member and attempt to retrieve the ke
     hello
     ```
 
-    Restarting the member re-establish the connection. `etcdctl` will now be able to retrieve the key successfully. To learn more about interacting with etcd, read [interacting with etcd section][interacting].
+    Restarting the member re-establishs the connection. `etcdctl` will now be able to retrieve the key successfully. To learn more about interacting with etcd, read [interacting with etcd section][interacting].
 
 [clustering]: https://etcd.io/docs/latest/op-guide/clustering/
 [interacting]: https://etcd.io/docs/latest/dev-guide/interacting_v3/

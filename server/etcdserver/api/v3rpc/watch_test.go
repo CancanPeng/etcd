@@ -16,6 +16,7 @@ package v3rpc
 
 import (
 	"bytes"
+	"errors"
 	"math"
 	"testing"
 
@@ -26,7 +27,7 @@ import (
 func TestSendFragment(t *testing.T) {
 	tt := []struct {
 		wr              *pb.WatchResponse
-		maxRequestBytes int
+		maxRequestBytes uint
 		fragments       int
 		werr            error
 	}{
@@ -69,7 +70,7 @@ func TestSendFragment(t *testing.T) {
 			return nil
 		}
 		err := sendFragments(tt[i].wr, tt[i].maxRequestBytes, testSend)
-		if err != tt[i].werr {
+		if !errors.Is(err, tt[i].werr) {
 			t.Errorf("#%d: expected error %v, got %v", i, tt[i].werr, err)
 		}
 		got := len(fragmentedResp)

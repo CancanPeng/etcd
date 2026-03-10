@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
 )
 
@@ -72,24 +73,17 @@ func TestConfigFromFile(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		tmpfile, err := os.CreateTemp("", "clientcfg")
+		tmpfile, err := os.CreateTemp(t.TempDir(), "clientcfg")
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		b, err := yaml.Marshal(tt.ym)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 
 		_, err = tmpfile.Write(b)
-		if err != nil {
-			t.Fatal(err)
-		}
-		err = tmpfile.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
+		require.NoError(t, tmpfile.Close())
 
 		cfg, cerr := NewConfig(tmpfile.Name())
 		if cerr != nil && !tt.werr {

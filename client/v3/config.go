@@ -19,9 +19,10 @@ import (
 	"crypto/tls"
 	"time"
 
-	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+
+	"go.etcd.io/etcd/client/pkg/v3/transport"
 )
 
 type Config struct {
@@ -53,7 +54,7 @@ type Config struct {
 	// If 0, it defaults to "math.MaxInt32", because range response can
 	// easily exceed request send limits.
 	// Make sure that "MaxCallRecvMsgSize" >= server-side default send/recv limit.
-	// ("--max-request-bytes" flag to etcd or "embed.Config.MaxRequestBytes").
+	// ("--max-recv-bytes" flag to etcd).
 	MaxCallRecvMsgSize int
 
 	// TLS holds the client secure credentials, if any.
@@ -65,12 +66,15 @@ type Config struct {
 	// Password is a password for authentication.
 	Password string `json:"password"`
 
+	// Token is a JWT used for authentication instead of a password.
+	Token string `json:"token"`
+
 	// RejectOldCluster when set will refuse to create a client against an outdated cluster.
 	RejectOldCluster bool `json:"reject-old-cluster"`
 
 	// DialOptions is a list of dial options for the grpc client (e.g., for interceptors).
-	// For example, pass "grpc.WithBlock()" to block until the underlying connection is up.
-	// Without this, Dial returns immediately and connecting the server happens in background.
+	// Note that grpc.NewClient ignores options that are specific to grpc.Dial such as
+	// "grpc.WithBlock()". Use DialTimeout to bound client initialization time.
 	DialOptions []grpc.DialOption
 
 	// Context is the default client context; it can be used to cancel grpc dial out and
@@ -89,6 +93,15 @@ type Config struct {
 	// PermitWithoutStream when set will allow client to send keepalive pings to server without any active streams(RPCs).
 	PermitWithoutStream bool `json:"permit-without-stream"`
 
+	// MaxUnaryRetries is the maximum number of retries for unary RPCs.
+	MaxUnaryRetries uint `json:"max-unary-retries"`
+
+	// BackoffWaitBetween is the wait time before retrying an RPC.
+	BackoffWaitBetween time.Duration `json:"backoff-wait-between"`
+
+	// BackoffJitterFraction is the jitter fraction to randomize backoff wait time.
+	BackoffJitterFraction float64 `json:"backoff-jitter-fraction"`
+
 	// TODO: support custom balancer picker
 }
 
@@ -96,13 +109,15 @@ type Config struct {
 // environment variables or config file. It is a fully declarative configuration,
 // and can be serialized & deserialized to/from JSON.
 type ConfigSpec struct {
-	Endpoints        []string      `json:"endpoints"`
-	RequestTimeout   time.Duration `json:"request-timeout"`
-	DialTimeout      time.Duration `json:"dial-timeout"`
-	KeepAliveTime    time.Duration `json:"keepalive-time"`
-	KeepAliveTimeout time.Duration `json:"keepalive-timeout"`
-	Secure           *SecureConfig `json:"secure"`
-	Auth             *AuthConfig   `json:"auth"`
+	Endpoints          []string      `json:"endpoints"`
+	RequestTimeout     time.Duration `json:"request-timeout"`
+	DialTimeout        time.Duration `json:"dial-timeout"`
+	KeepAliveTime      time.Duration `json:"keepalive-time"`
+	KeepAliveTimeout   time.Duration `json:"keepalive-timeout"`
+	MaxCallSendMsgSize int           `json:"max-request-bytes"`
+	MaxCallRecvMsgSize int           `json:"max-recv-bytes"`
+	Secure             *SecureConfig `json:"secure"`
+	Auth               *AuthConfig   `json:"auth"`
 }
 
 type SecureConfig struct {
@@ -118,6 +133,35 @@ type SecureConfig struct {
 type AuthConfig struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	Token    string `json:"token"`
+}
+
+func (cs *ConfigSpec) Clone() *ConfigSpec {
+	if cs == nil {
+		return nil
+	}
+
+	clone := *cs
+
+	if len(cs.Endpoints) > 0 {
+		clone.Endpoints = make([]string, len(cs.Endpoints))
+		copy(clone.Endpoints, cs.Endpoints)
+	}
+
+	if cs.Secure != nil {
+		clone.Secure = &SecureConfig{}
+		*clone.Secure = *cs.Secure
+	}
+	if cs.Auth != nil {
+		clone.Auth = &AuthConfig{}
+		*clone.Auth = *cs.Auth
+	}
+
+	return &clone
+}
+
+func (cfg AuthConfig) Empty() bool {
+	return cfg.Username == "" && cfg.Password == "" && cfg.Token == ""
 }
 
 // NewClientConfig creates a Config based on the provided ConfigSpec.
@@ -132,12 +176,15 @@ func NewClientConfig(confSpec *ConfigSpec, lg *zap.Logger) (*Config, error) {
 		DialTimeout:          confSpec.DialTimeout,
 		DialKeepAliveTime:    confSpec.KeepAliveTime,
 		DialKeepAliveTimeout: confSpec.KeepAliveTimeout,
+		MaxCallSendMsgSize:   confSpec.MaxCallSendMsgSize,
+		MaxCallRecvMsgSize:   confSpec.MaxCallRecvMsgSize,
 		TLS:                  tlsCfg,
 	}
 
 	if confSpec.Auth != nil {
 		cfg.Username = confSpec.Auth.Username
 		cfg.Password = confSpec.Auth.Password
+		cfg.Token = confSpec.Auth.Token
 	}
 
 	return cfg, nil
@@ -175,8 +222,11 @@ func newTLSConfig(scfg *SecureConfig, lg *zap.Logger) (*tls.Config, error) {
 
 	// If the user wants to skip TLS verification then we should set
 	// the InsecureSkipVerify flag in tls configuration.
-	if tlsCfg != nil && scfg.InsecureSkipVerify {
-		tlsCfg.InsecureSkipVerify = true
+	if scfg.InsecureSkipVerify {
+		if tlsCfg == nil {
+			tlsCfg = &tls.Config{}
+		}
+		tlsCfg.InsecureSkipVerify = scfg.InsecureSkipVerify
 	}
 
 	return tlsCfg, nil

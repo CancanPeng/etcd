@@ -19,11 +19,10 @@ import (
 	"os"
 	"runtime"
 
-	"go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/tests/v3/framework/testutils"
 )
 
 var (
-	BinDir  string
 	CertDir string
 
 	CertPath       string
@@ -40,23 +39,51 @@ var (
 	RevokedCertPath       string
 	RevokedPrivateKeyPath string
 
-	FixturesDir = integration.MustAbsPath("../fixtures")
+	BinPath     binPath
+	FixturesDir = testutils.MustAbsPath("../fixtures")
 )
+
+type binPath struct {
+	Etcd            string
+	EtcdLastRelease string
+	Etcdctl         string
+	Etcdutl         string
+	LazyFS          string
+}
+
+func (bp *binPath) LazyFSAvailable() bool {
+	_, err := os.Stat(bp.LazyFS)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			panic(err)
+		}
+		return false
+	}
+	return true
+}
 
 func InitFlags() {
 	os.Setenv("ETCD_UNSUPPORTED_ARCH", runtime.GOARCH)
-	os.Unsetenv("ETCDCTL_API")
 
-	binDirDef := integration.MustAbsPath("../../bin")
+	binDirDef := testutils.MustAbsPath("../../bin")
 	certDirDef := FixturesDir
 
-	flag.StringVar(&BinDir, "bin-dir", binDirDef, "The directory for store etcd and etcdctl binaries.")
+	binDir := flag.String("bin-dir", binDirDef, "The directory for store etcd and etcdctl binaries.")
+	binLastRelease := flag.String("bin-last-release", "", "The path for the last release etcd binary.")
+
 	flag.StringVar(&CertDir, "cert-dir", certDirDef, "The directory for store certificate files.")
 	flag.Parse()
 
-	BinPath = BinDir + "/etcd"
-	CtlBinPath = BinDir + "/etcdctl"
-	UtlBinPath = BinDir + "/etcdutl"
+	BinPath = binPath{
+		Etcd:            *binDir + "/etcd",
+		EtcdLastRelease: *binDir + "/etcd-last-release",
+		Etcdctl:         *binDir + "/etcdctl",
+		Etcdutl:         *binDir + "/etcdutl",
+		LazyFS:          *binDir + "/lazyfs",
+	}
+	if *binLastRelease != "" {
+		BinPath.EtcdLastRelease = *binLastRelease
+	}
 	CertPath = CertDir + "/server.crt"
 	PrivateKeyPath = CertDir + "/server.key.insecure"
 	CaPath = CertDir + "/ca.crt"

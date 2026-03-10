@@ -85,7 +85,7 @@ func (t txMock) UnsafeGetRole(s string) *authpb.Role {
 }
 
 func (t txMock) UnsafeGetAllUsers() []*authpb.User {
-	users := []*authpb.User{}
+	var users []*authpb.User
 	for _, u := range t.be.users {
 		users = append(users, u)
 	}
@@ -93,7 +93,7 @@ func (t txMock) UnsafeGetAllUsers() []*authpb.User {
 }
 
 func (t txMock) UnsafeGetAllRoles() []*authpb.Role {
-	roles := []*authpb.Role{}
+	var roles []*authpb.Role
 	for _, r := range t.be.roles {
 		roles = append(roles, r)
 	}
@@ -104,6 +104,12 @@ func (t txMock) Lock() {
 }
 
 func (t txMock) Unlock() {
+}
+
+func (t txMock) RLock() {
+}
+
+func (t txMock) RUnlock() {
 }
 
 func (t txMock) UnsafeSaveAuthEnabled(enabled bool) {

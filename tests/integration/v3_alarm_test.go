@@ -22,6 +22,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
+
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/pkg/v3/traceutil"
@@ -30,7 +33,6 @@ import (
 	"go.etcd.io/etcd/server/v3/storage/mvcc"
 	"go.etcd.io/etcd/server/v3/storage/schema"
 	"go.etcd.io/etcd/tests/v3/framework/integration"
-	"go.uber.org/zap/zaptest"
 )
 
 // TestV3StorageQuotaApply tests the V3 server respects quotas during apply
@@ -54,32 +56,24 @@ func TestV3StorageQuotaApply(t *testing.T) {
 
 	// test small put still works
 	smallbuf := make([]byte, 1024)
-	_, serr := kvc0.Put(context.TODO(), &pb.PutRequest{Key: key, Value: smallbuf})
-	if serr != nil {
-		t.Fatal(serr)
-	}
+	_, serr := kvc0.Put(t.Context(), &pb.PutRequest{Key: key, Value: smallbuf})
+	require.NoError(t, serr)
 
 	// test big put
 	bigbuf := make([]byte, quotasize)
-	_, err := kvc1.Put(context.TODO(), &pb.PutRequest{Key: key, Value: bigbuf})
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, err := kvc1.Put(t.Context(), &pb.PutRequest{Key: key, Value: bigbuf})
+	require.NoError(t, err)
 
 	// quorum get should work regardless of whether alarm is raised
-	_, err = kvc0.Range(context.TODO(), &pb.RangeRequest{Key: []byte("foo")})
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, err = kvc0.Range(t.Context(), &pb.RangeRequest{Key: []byte("foo")})
+	require.NoError(t, err)
 
 	// wait until alarm is raised for sure-- poll the alarms
 	stopc := time.After(5 * time.Second)
 	for {
 		req := &pb.AlarmRequest{Action: pb.AlarmRequest_GET}
-		resp, aerr := clus.Members[0].Server.Alarm(context.TODO(), req)
-		if aerr != nil {
-			t.Fatal(aerr)
-		}
+		resp, aerr := clus.Members[0].Server.Alarm(t.Context(), req)
+		require.NoError(t, aerr)
 		if len(resp.Alarms) != 0 {
 			break
 		}
@@ -91,7 +85,7 @@ func TestV3StorageQuotaApply(t *testing.T) {
 	}
 
 	// txn with non-mutating Ops should go through when NOSPACE alarm is raised
-	_, err = kvc0.Txn(context.TODO(), &pb.TxnRequest{
+	_, err = kvc0.Txn(t.Context(), &pb.TxnRequest{
 		Compare: []*pb.Compare{
 			{
 				Key:         key,
@@ -110,31 +104,26 @@ func TestV3StorageQuotaApply(t *testing.T) {
 			},
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.TODO(), integration.RequestWaitTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), integration.RequestWaitTimeout)
 	defer cancel()
 
 	// small quota machine should reject put
-	if _, err := kvc0.Put(ctx, &pb.PutRequest{Key: key, Value: smallbuf}); err == nil {
-		t.Fatalf("past-quota instance should reject put")
-	}
+	_, err = kvc0.Put(ctx, &pb.PutRequest{Key: key, Value: smallbuf})
+	require.Errorf(t, err, "past-quota instance should reject put")
 
 	// large quota machine should reject put
-	if _, err := kvc1.Put(ctx, &pb.PutRequest{Key: key, Value: smallbuf}); err == nil {
-		t.Fatalf("past-quota instance should reject put")
-	}
+	_, err = kvc1.Put(ctx, &pb.PutRequest{Key: key, Value: smallbuf})
+	require.Errorf(t, err, "past-quota instance should reject put")
 
 	// reset large quota node to ensure alarm persisted
 	clus.Members[1].Stop(t)
 	clus.Members[1].Restart(t)
 	clus.WaitMembersForLeader(t, clus.Members)
 
-	if _, err := kvc1.Put(context.TODO(), &pb.PutRequest{Key: key, Value: smallbuf}); err == nil {
-		t.Fatalf("alarmed instance should reject put after reset")
-	}
+	_, err = kvc1.Put(t.Context(), &pb.PutRequest{Key: key, Value: smallbuf})
+	require.Errorf(t, err, "alarmed instance should reject put after reset")
 }
 
 // TestV3AlarmDeactivate ensures that space alarms can be deactivated so puts go through.
@@ -151,25 +140,22 @@ func TestV3AlarmDeactivate(t *testing.T) {
 		Action:   pb.AlarmRequest_ACTIVATE,
 		Alarm:    pb.AlarmType_NOSPACE,
 	}
-	if _, err := mt.Alarm(context.TODO(), alarmReq); err != nil {
-		t.Fatal(err)
-	}
+	_, err := mt.Alarm(t.Context(), alarmReq)
+	require.NoError(t, err)
 
 	key := []byte("abc")
 	smallbuf := make([]byte, 512)
-	_, err := kvc.Put(context.TODO(), &pb.PutRequest{Key: key, Value: smallbuf})
+	_, err = kvc.Put(t.Context(), &pb.PutRequest{Key: key, Value: smallbuf})
 	if err == nil && !eqErrGRPC(err, rpctypes.ErrGRPCNoSpace) {
 		t.Fatalf("put got %v, expected %v", err, rpctypes.ErrGRPCNoSpace)
 	}
 
 	alarmReq.Action = pb.AlarmRequest_DEACTIVATE
-	if _, err = mt.Alarm(context.TODO(), alarmReq); err != nil {
-		t.Fatal(err)
-	}
+	_, err = mt.Alarm(t.Context(), alarmReq)
+	require.NoError(t, err)
 
-	if _, err = kvc.Put(context.TODO(), &pb.PutRequest{Key: key, Value: smallbuf}); err != nil {
-		t.Fatal(err)
-	}
+	_, err = kvc.Put(t.Context(), &pb.PutRequest{Key: key, Value: smallbuf})
+	require.NoError(t, err)
 }
 
 func TestV3CorruptAlarm(t *testing.T) {
@@ -183,7 +169,7 @@ func TestV3CorruptAlarm(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func() {
 			defer wg.Done()
-			if _, err := clus.Client(0).Put(context.TODO(), "k", "v"); err != nil {
+			if _, err := clus.Client(0).Put(t.Context(), "k", "v"); err != nil {
 				t.Error(err)
 			}
 		}()
@@ -208,15 +194,12 @@ func TestV3CorruptAlarm(t *testing.T) {
 	time.Sleep(time.Second * 2)
 
 	// Wait for cluster so Puts succeed in case member 0 was the leader.
-	if _, err := clus.Client(1).Get(context.TODO(), "k"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := clus.Client(1).Put(context.TODO(), "xyz", "321"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := clus.Client(1).Put(context.TODO(), "abc", "fed"); err != nil {
-		t.Fatal(err)
-	}
+	_, err := clus.Client(1).Get(t.Context(), "k")
+	require.NoError(t, err)
+	_, err = clus.Client(1).Put(t.Context(), "xyz", "321")
+	require.NoError(t, err)
+	_, err = clus.Client(1).Put(t.Context(), "abc", "fed")
+	require.NoError(t, err)
 
 	// Restart with corruption checking enabled.
 	clus.Members[1].Stop(t)
@@ -229,28 +212,21 @@ func TestV3CorruptAlarm(t *testing.T) {
 	time.Sleep(time.Second * 2)
 
 	clus.Members[0].WaitStarted(t)
-	resp0, err0 := clus.Client(0).Get(context.TODO(), "abc")
-	if err0 != nil {
-		t.Fatal(err0)
-	}
+	resp0, err0 := clus.Client(0).Get(t.Context(), "abc")
+	require.NoError(t, err0)
 	clus.Members[1].WaitStarted(t)
-	resp1, err1 := clus.Client(1).Get(context.TODO(), "abc")
-	if err1 != nil {
-		t.Fatal(err1)
-	}
+	resp1, err1 := clus.Client(1).Get(t.Context(), "abc")
+	require.NoError(t, err1)
 
-	if resp0.Kvs[0].ModRevision == resp1.Kvs[0].ModRevision {
-		t.Fatalf("matching ModRevision values")
-	}
+	require.NotEqualf(t, resp0.Kvs[0].ModRevision, resp1.Kvs[0].ModRevision, "matching ModRevision values")
 
 	for i := 0; i < 5; i++ {
-		presp, perr := clus.Client(0).Put(context.TODO(), "abc", "aaa")
+		presp, perr := clus.Client(0).Put(t.Context(), "abc", "aaa")
 		if perr != nil {
-			if !eqErrGRPC(perr, rpctypes.ErrCorrupt) {
-				t.Fatalf("expected %v, got %+v (%v)", rpctypes.ErrCorrupt, presp, perr)
-			} else {
+			if eqErrGRPC(perr, rpctypes.ErrCorrupt) {
 				return
 			}
+			t.Fatalf("expected %v, got %+v (%v)", rpctypes.ErrCorrupt, presp, perr)
 		}
 		time.Sleep(time.Second)
 	}
@@ -261,14 +237,15 @@ func TestV3CorruptAlarmWithLeaseCorrupted(t *testing.T) {
 	integration.BeforeTest(t)
 	lg := zaptest.NewLogger(t)
 	clus := integration.NewCluster(t, &integration.ClusterConfig{
-		CorruptCheckTime:       time.Second,
-		Size:                   3,
-		SnapshotCount:          10,
-		SnapshotCatchUpEntries: 5,
+		CorruptCheckTime:           time.Second,
+		Size:                       3,
+		SnapshotCount:              10,
+		SnapshotCatchUpEntries:     5,
+		DisableStrictReconfigCheck: true,
 	})
 	defer clus.Terminate(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	lresp, err := integration.ToGRPC(clus.RandClient()).Lease.LeaseGrant(ctx, &pb.LeaseGrantRequest{ID: 1, TTL: 60})
@@ -282,15 +259,13 @@ func TestV3CorruptAlarmWithLeaseCorrupted(t *testing.T) {
 	putr := &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar"), Lease: lresp.ID}
 	// Trigger snapshot from the leader to new member
 	for i := 0; i < 15; i++ {
-		_, err := integration.ToGRPC(clus.RandClient()).KV.Put(ctx, putr)
+		_, err = integration.ToGRPC(clus.RandClient()).KV.Put(ctx, putr)
 		if err != nil {
 			t.Errorf("#%d: couldn't put key (%v)", i, err)
 		}
 	}
 
-	if err := clus.RemoveMember(t, clus.Client(1), uint64(clus.Members[2].ID())); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, clus.RemoveMember(t, clus.Client(1), uint64(clus.Members[2].ID())))
 	clus.WaitMembersForLeader(t, clus.Members)
 
 	clus.AddMember(t)
@@ -312,43 +287,30 @@ func TestV3CorruptAlarmWithLeaseCorrupted(t *testing.T) {
 	schema.MustUnsafePutLease(tx, &lpb)
 	tx.Commit()
 
-	if err := be.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, be.Close())
 
-	if err := clus.Members[2].Restart(t); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, clus.Members[2].Restart(t))
 
 	clus.Members[1].WaitOK(t)
 	clus.Members[2].WaitOK(t)
 
 	// Revoke lease should remove key except the member with corruption
 	_, err = integration.ToGRPC(clus.Members[0].Client).Lease.LeaseRevoke(ctx, &pb.LeaseRevokeRequest{ID: lresp.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp0, err0 := clus.Members[1].Client.KV.Get(context.TODO(), "foo")
-	if err0 != nil {
-		t.Fatal(err0)
-	}
-	resp1, err1 := clus.Members[2].Client.KV.Get(context.TODO(), "foo")
-	if err1 != nil {
-		t.Fatal(err1)
-	}
+	require.NoError(t, err)
+	resp0, err0 := clus.Members[1].Client.KV.Get(t.Context(), "foo")
+	require.NoError(t, err0)
+	resp1, err1 := clus.Members[2].Client.KV.Get(t.Context(), "foo")
+	require.NoError(t, err1)
 
-	if resp0.Header.Revision == resp1.Header.Revision {
-		t.Fatalf("matching Revision values")
-	}
+	require.NotEqualf(t, resp0.Header.Revision, resp1.Header.Revision, "matching Revision values")
 
 	// Wait for CorruptCheckTime
 	time.Sleep(time.Second)
-	presp, perr := clus.Client(0).Put(context.TODO(), "abc", "aaa")
+	presp, perr := clus.Client(0).Put(t.Context(), "abc", "aaa")
 	if perr != nil {
-		if !eqErrGRPC(perr, rpctypes.ErrCorrupt) {
-			t.Fatalf("expected %v, got %+v (%v)", rpctypes.ErrCorrupt, presp, perr)
-		} else {
+		if eqErrGRPC(perr, rpctypes.ErrCorrupt) {
 			return
 		}
+		t.Fatalf("expected %v, got %+v (%v)", rpctypes.ErrCorrupt, presp, perr)
 	}
 }

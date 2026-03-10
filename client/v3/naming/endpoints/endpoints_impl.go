@@ -22,12 +22,12 @@ import (
 	"errors"
 	"strings"
 
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/client/v3/naming/endpoints/internal"
-
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/naming/endpoints/internal"
 )
 
 type endpointManager struct {
@@ -92,7 +92,8 @@ func (m *endpointManager) DeleteEndpoint(ctx context.Context, key string, opts .
 }
 
 func (m *endpointManager) NewWatchChannel(ctx context.Context) (WatchChannel, error) {
-	resp, err := m.client.Get(ctx, m.target, clientv3.WithPrefix(), clientv3.WithSerializable())
+	key := m.target + "/"
+	resp, err := m.client.Get(ctx, key, clientv3.WithPrefix(), clientv3.WithSerializable())
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +127,8 @@ func (m *endpointManager) watch(ctx context.Context, rev int64, upch chan []*Upd
 
 	lg := m.client.GetLogger()
 	opts := []clientv3.OpOption{clientv3.WithRev(rev), clientv3.WithPrefix()}
-	wch := m.client.Watch(ctx, m.target, opts...)
+	key := m.target + "/"
+	wch := m.client.Watch(ctx, key, opts...)
 	for {
 		select {
 		case <-ctx.Done():
@@ -171,7 +173,8 @@ func (m *endpointManager) watch(ctx context.Context, rev int64, upch chan []*Upd
 }
 
 func (m *endpointManager) List(ctx context.Context) (Key2EndpointMap, error) {
-	resp, err := m.client.Get(ctx, m.target, clientv3.WithPrefix(), clientv3.WithSerializable())
+	key := m.target + "/"
+	resp, err := m.client.Get(ctx, key, clientv3.WithPrefix(), clientv3.WithSerializable())
 	if err != nil {
 		return nil, err
 	}

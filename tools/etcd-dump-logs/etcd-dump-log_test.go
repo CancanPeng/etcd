@@ -15,7 +15,6 @@
 package main
 
 import (
-	"bytes"
 	"os"
 	"os/exec"
 	"path"
@@ -23,64 +22,35 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
+
 	"go.etcd.io/etcd/api/v3/authpb"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/pkg/v3/pbutil"
-	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/storage/wal"
-	"go.uber.org/zap/zaptest"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 func TestEtcdDumpLogEntryType(t *testing.T) {
 	// directory where the command is
 	binDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
+	// TODO(ptabor): The test does not run by default from ./scripts/test.sh.
 	dumpLogsBinary := path.Join(binDir + "/etcd-dump-logs")
 	if !fileutil.Exist(dumpLogsBinary) {
 		t.Skipf("%q does not exist", dumpLogsBinary)
 	}
 
-	decoder_correctoutputformat := filepath.Join(binDir, "/testdecoder/decoder_correctoutputformat.sh")
-	decoder_wrongoutputformat := filepath.Join(binDir, "/testdecoder/decoder_wrongoutputformat.sh")
+	decoderCorrectOutputFormat := filepath.Join(binDir, "/testdecoder/decoder_correctoutputformat.sh")
+	decoderWrongOutputFormat := filepath.Join(binDir, "/testdecoder/decoder_wrongoutputformat.sh")
 
 	p := t.TempDir()
 
-	memberdir := filepath.Join(p, "member")
-	err = os.Mkdir(memberdir, 0744)
-	if err != nil {
-		t.Fatal(err)
-	}
-	waldir := walDir(p)
-	snapdir := snapDir(p)
-
-	w, err := wal.Create(zaptest.NewLogger(t), waldir, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = os.Mkdir(snapdir, 0744)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ents := make([]raftpb.Entry, 0)
-
-	// append entries into wal log
-	appendConfigChangeEnts(&ents)
-	appendNormalRequestEnts(&ents)
-	appendNormalIRREnts(&ents)
-	appendUnknownNormalEnts(&ents)
-
-	// force commit newly appended entries
-	err = w.Save(raftpb.HardState{}, ents)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.Close()
+	mustCreateWALLog(t, p)
 
 	argtests := []struct {
 		name         string
@@ -100,34 +70,50 @@ func TestEtcdDumpLogEntryType(t *testing.T) {
 		{"lease grant entry-type", []string{"-entry-type", "IRRLeaseGrant", p}, "expectedoutput/listIRRLeaseGrant.output"},
 		{"lease revoke entry-type", []string{"-entry-type", "IRRLeaseRevoke", p}, "expectedoutput/listIRRLeaseRevoke.output"},
 		{"confchange and txn entry-type", []string{"-entry-type", "ConfigChange,IRRCompaction", p}, "expectedoutput/listConfigChangeIRRCompaction.output"},
-		{"decoder_correctoutputformat", []string{"-stream-decoder", decoder_correctoutputformat, p}, "expectedoutput/decoder_correctoutputformat.output"},
-		{"decoder_wrongoutputformat", []string{"-stream-decoder", decoder_wrongoutputformat, p}, "expectedoutput/decoder_wrongoutputformat.output"},
+		{"decoder_correctoutputformat", []string{"-stream-decoder", decoderCorrectOutputFormat, p}, "expectedoutput/decoder_correctoutputformat.output"},
+		{"decoder_wrongoutputformat", []string{"-stream-decoder", decoderWrongOutputFormat, p}, "expectedoutput/decoder_wrongoutputformat.output"},
 	}
 
 	for _, argtest := range argtests {
 		t.Run(argtest.name, func(t *testing.T) {
 			cmd := exec.Command(dumpLogsBinary, argtest.args...)
 			actual, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 			expected, err := os.ReadFile(path.Join(binDir, argtest.fileExpected))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(actual, expected) {
-				t.Errorf(`Got input of length %d, wanted input of length %d
-==== BEGIN RECEIVED FILE ====
-%s
-==== END RECEIVED FILE ====
-==== BEGIN EXPECTED FILE ====
-%s
-==== END EXPECTED FILE ====
-`, len(actual), len(expected), actual, expected)
-			}
+			require.NoError(t, err)
+
+			assert.Equal(t, string(expected), string(actual))
+			// The output files contains a lot of trailing whitespaces... difficult to diagnose without printing them explicitly.
+			// TODO(ptabor): Get rid of the whitespaces both in code and the test-files.
+			assert.Equal(t, strings.ReplaceAll(string(expected), " ", "_"), strings.ReplaceAll(string(actual), " ", "_"))
 		})
 	}
+}
 
+func mustCreateWALLog(t *testing.T, path string) {
+	memberdir := filepath.Join(path, "member")
+	err := os.Mkdir(memberdir, 0o744)
+	require.NoError(t, err)
+	waldir := walDir(path)
+	snapdir := snapDir(path)
+
+	w, err := wal.Create(zaptest.NewLogger(t), waldir, nil)
+	require.NoError(t, err)
+
+	err = os.Mkdir(snapdir, 0o744)
+	require.NoError(t, err)
+
+	ents := make([]raftpb.Entry, 0)
+
+	// append entries into wal log
+	appendConfigChangeEnts(&ents)
+	appendNormalIRREnts(&ents)
+	appendUnknownNormalEnts(&ents)
+
+	// force commit newly appended entries
+	err = w.Save(raftpb.HardState{}, ents)
+	require.NoError(t, err)
+	w.Close()
 }
 
 func appendConfigChangeEnts(ents *[]raftpb.Entry) {
@@ -146,28 +132,6 @@ func appendConfigChangeEnts(ents *[]raftpb.Entry) {
 	*ents = append(*ents, configChangeEntries...)
 }
 
-func appendNormalRequestEnts(ents *[]raftpb.Entry) {
-	a := true
-	b := false
-
-	requests := []etcdserverpb.Request{
-		{ID: 0, Method: "", Path: "/path0", Val: "{\"hey\":\"ho\",\"hi\":[\"yo\"]}", Dir: true, PrevValue: "", PrevIndex: 0, PrevExist: &b, Expiration: 9, Wait: false, Since: 1, Recursive: false, Sorted: false, Quorum: false, Time: 1, Stream: false, Refresh: &b},
-		{ID: 1, Method: "QGET", Path: "/path1", Val: "{\"0\":\"1\",\"2\":[\"3\"]}", Dir: false, PrevValue: "", PrevIndex: 0, PrevExist: &b, Expiration: 9, Wait: false, Since: 1, Recursive: false, Sorted: false, Quorum: false, Time: 1, Stream: false, Refresh: &b},
-		{ID: 2, Method: "SYNC", Path: "/path2", Val: "{\"0\":\"1\",\"2\":[\"3\"]}", Dir: false, PrevValue: "", PrevIndex: 0, PrevExist: &b, Expiration: 2, Wait: false, Since: 1, Recursive: false, Sorted: false, Quorum: false, Time: 1, Stream: false, Refresh: &b},
-		{ID: 3, Method: "DELETE", Path: "/path3", Val: "{\"hey\":\"ho\",\"hi\":[\"yo\"]}", Dir: false, PrevValue: "", PrevIndex: 0, PrevExist: &a, Expiration: 2, Wait: false, Since: 1, Recursive: false, Sorted: false, Quorum: false, Time: 1, Stream: false, Refresh: &b},
-		{ID: 4, Method: "RANDOM", Path: "/path4/superlong" + strings.Repeat("/path", 30), Val: "{\"hey\":\"ho\",\"hi\":[\"yo\"]}", Dir: false, PrevValue: "", PrevIndex: 0, PrevExist: &b, Expiration: 2, Wait: false, Since: 1, Recursive: false, Sorted: false, Quorum: false, Time: 1, Stream: false, Refresh: &b},
-	}
-
-	for i, request := range requests {
-		var currentry raftpb.Entry
-		currentry.Term = 3
-		currentry.Index = uint64(i + 5)
-		currentry.Type = raftpb.EntryNormal
-		currentry.Data = pbutil.MustMarshal(&request)
-		*ents = append(*ents, currentry)
-	}
-}
-
 func appendNormalIRREnts(ents *[]raftpb.Entry) {
 	irrrange := &etcdserverpb.RangeRequest{Key: []byte("1"), RangeEnd: []byte("hi"), Limit: 6, Revision: 1, SortOrder: 1, SortTarget: 0, Serializable: false, KeysOnly: false, CountOnly: false, MinModRevision: 0, MaxModRevision: 20000, MinCreateRevision: 0, MaxCreateRevision: 20000}
 
@@ -175,11 +139,12 @@ func appendNormalIRREnts(ents *[]raftpb.Entry) {
 
 	irrdeleterange := &etcdserverpb.DeleteRangeRequest{Key: []byte("0"), RangeEnd: []byte("9"), PrevKv: true}
 
-	delInRangeReq := &etcdserverpb.RequestOp{Request: &etcdserverpb.RequestOp_RequestDeleteRange{
-		RequestDeleteRange: &etcdserverpb.DeleteRangeRequest{
-			Key: []byte("a"), RangeEnd: []byte("b"),
+	delInRangeReq := &etcdserverpb.RequestOp{
+		Request: &etcdserverpb.RequestOp_RequestDeleteRange{
+			RequestDeleteRange: &etcdserverpb.DeleteRangeRequest{
+				Key: []byte("a"), RangeEnd: []byte("b"),
+			},
 		},
-	},
 	}
 
 	irrtxn := &etcdserverpb.TxnRequest{Success: []*etcdserverpb.RequestOp{delInRangeReq}, Failure: []*etcdserverpb.RequestOp{delInRangeReq}}
@@ -221,7 +186,7 @@ func appendNormalIRREnts(ents *[]raftpb.Entry) {
 	irrauthroleget := &etcdserverpb.AuthRoleGetRequest{Role: "role3"}
 
 	perm := &authpb.Permission{
-		PermType: authpb.WRITE,
+		PermType: authpb.Permission_WRITE,
 		Key:      []byte("Keys"),
 		RangeEnd: []byte("RangeEnd"),
 	}

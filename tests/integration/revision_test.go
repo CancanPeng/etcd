@@ -23,12 +23,15 @@ import (
 	"testing"
 	"time"
 
-	"go.etcd.io/etcd/tests/v3/framework/integration"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/status"
+
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 func TestRevisionMonotonicWithLeaderPartitions(t *testing.T) {
-	testRevisionMonotonicWithFailures(t, 11*time.Second, func(clus *integration.Cluster) {
+	testRevisionMonotonicWithFailures(t, 12*time.Second, func(clus *integration.Cluster) {
 		for i := 0; i < 5; i++ {
 			leader := clus.WaitLeader(t)
 			time.Sleep(time.Second)
@@ -78,7 +81,7 @@ func testRevisionMonotonicWithFailures(t *testing.T, testDuration time.Duration,
 	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true})
 	defer clus.Terminate(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), testDuration)
+	ctx, cancel := context.WithTimeout(t.Context(), testDuration)
 	defer cancel()
 
 	wg := sync.WaitGroup{}
@@ -86,7 +89,7 @@ func testRevisionMonotonicWithFailures(t *testing.T, testDuration time.Duration,
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			putWorker(t, ctx, clus)
+			putWorker(ctx, t, clus)
 		}()
 	}
 
@@ -94,34 +97,30 @@ func testRevisionMonotonicWithFailures(t *testing.T, testDuration time.Duration,
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			getWorker(t, ctx, clus)
+			getWorker(ctx, t, clus) //nolint:testifylint
 		}()
 	}
 
 	injectFailures(clus)
 	wg.Wait()
 	kv := clus.Client(0)
-	resp, err := kv.Get(context.Background(), "foo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp, err := kv.Get(t.Context(), "foo")
+	require.NoError(t, err)
 	t.Logf("Revision %d", resp.Header.Revision)
 }
 
-func putWorker(t *testing.T, ctx context.Context, clus *integration.Cluster) {
+func putWorker(ctx context.Context, t *testing.T, clus *integration.Cluster) {
 	for i := 0; ; i++ {
 		kv := clus.Client(i % 3)
 		_, err := kv.Put(ctx, "foo", fmt.Sprintf("%d", i))
 		if errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
-		if silenceConnectionErrors(err) != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(t, silenceConnectionErrors(err))
 	}
 }
 
-func getWorker(t *testing.T, ctx context.Context, clus *integration.Cluster) {
+func getWorker(ctx context.Context, t *testing.T, clus *integration.Cluster) {
 	var prevRev int64
 	for i := 0; ; i++ {
 		kv := clus.Client(i % 3)
@@ -129,15 +128,11 @@ func getWorker(t *testing.T, ctx context.Context, clus *integration.Cluster) {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
-		if silenceConnectionErrors(err) != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, silenceConnectionErrors(err))
 		if resp == nil {
 			continue
 		}
-		if prevRev > resp.Header.Revision {
-			t.Fatalf("rev is less than previously observed revision, rev: %d, prevRev: %d", resp.Header.Revision, prevRev)
-		}
+		require.LessOrEqualf(t, prevRev, resp.Header.Revision, "rev is less than previously observed revision, rev: %d, prevRev: %d", resp.Header.Revision, prevRev)
 		prevRev = resp.Header.Revision
 	}
 }
@@ -148,7 +143,7 @@ func silenceConnectionErrors(err error) error {
 	}
 	s := status.Convert(err)
 	for _, msg := range connectionErrorMessages {
-		if strings.Index(s.Message(), msg) != -1 {
+		if strings.Contains(s.Message(), msg) {
 			return nil
 		}
 	}

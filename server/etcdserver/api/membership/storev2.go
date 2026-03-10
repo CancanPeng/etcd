@@ -19,12 +19,11 @@ import (
 	"fmt"
 	"path"
 
-	"go.etcd.io/etcd/client/pkg/v3/types"
-
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
-
 	"github.com/coreos/go-semver/semver"
 	"go.uber.org/zap"
+
+	"go.etcd.io/etcd/client/pkg/v3/types"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
 )
 
 const (
@@ -48,8 +47,66 @@ func IsMetaStoreOnly(store v2store.Store) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
+	// storePermsPrefix is the internal prefix of the storage layer dedicated to storing user data.
+	// refer to https://github.com/etcd-io/etcd/blob/v3.5.21/server/etcdserver/api/v2auth/auth.go#L40
+	storePermsPrefix := "/2"
 	for _, n := range event.Node.Nodes {
-		if n.Key != storePrefix && n.Nodes.Len() > 0 {
+		if n.Key == storePrefix {
+			continue
+		}
+
+		// For auth data, even after we remove all users and roles, the node
+		// "/2/roles" and "/2/users" are still present in the tree. We need
+		// to exclude such case. See an example below,
+		// Refer to https://github.com/etcd-io/etcd/discussions/20231#discussioncomment-13791940
+		/*
+			"2": {
+				"Path": "/2",
+					"CreatedIndex": 204749,
+					"ModifiedIndex": 204749,
+					"ExpireTime": "0001-01-01T00:00:00Z",
+					"Value": "",
+					"Children": {
+					"enabled": {
+						"Path": "/2/enabled",
+							"CreatedIndex": 204752,
+							"ModifiedIndex": 16546016,
+							"ExpireTime": "0001-01-01T00:00:00Z",
+							"Value": "false",
+							"Children": null
+					},
+					"roles": {
+						"Path": "/2/roles",
+							"CreatedIndex": 204751,
+							"ModifiedIndex": 204751,
+							"ExpireTime": "0001-01-01T00:00:00Z",
+							"Value": "",
+							"Children": {}
+					},
+					"users": {
+						"Path": "/2/users",
+							"CreatedIndex": 204750,
+							"ModifiedIndex": 204750,
+							"ExpireTime": "0001-01-01T00:00:00Z",
+							"Value": "",
+							"Children": {}
+					}
+				}
+			}
+		*/
+		if n.Key == storePermsPrefix {
+			if n.Nodes.Len() > 0 {
+				for _, child := range n.Nodes {
+					if child.Nodes.Len() > 0 {
+						return false, nil
+					}
+				}
+			}
+			continue
+		}
+
+		if n.Nodes.Len() > 0 {
 			return false, nil
 		}
 	}
@@ -57,25 +114,11 @@ func IsMetaStoreOnly(store v2store.Store) (bool, error) {
 	return true, nil
 }
 
-// TrimMembershipFromV2Store removes all information about members &
-// removed_members from the v2 store.
-func TrimMembershipFromV2Store(lg *zap.Logger, s v2store.Store) error {
-	members, removed := membersFromStore(lg, s)
-
-	for mID := range members {
-		_, err := s.Delete(MemberStoreKey(mID), true, true)
-		if err != nil {
-			return err
-		}
+func verifyNoMembersInStore(lg *zap.Logger, s v2store.Store) {
+	members, removed := MembersFromStore(lg, s)
+	if len(members) != 0 || len(removed) != 0 {
+		lg.Panic("store has membership info")
 	}
-	for mID := range removed {
-		_, err := s.Delete(RemovedMemberStoreKey(mID), true, true)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func mustSaveMemberToStore(lg *zap.Logger, s v2store.Store, m *Member) {
@@ -93,33 +136,11 @@ func mustSaveMemberToStore(lg *zap.Logger, s v2store.Store, m *Member) {
 	}
 }
 
-func mustDeleteMemberFromStore(lg *zap.Logger, s v2store.Store, id types.ID) {
-	if _, err := s.Delete(MemberStoreKey(id), true, true); err != nil {
-		lg.Panic(
-			"failed to delete member from store",
-			zap.String("path", MemberStoreKey(id)),
-			zap.Error(err),
-		)
-	}
+func mustAddToRemovedMembersInStore(lg *zap.Logger, s v2store.Store, id types.ID) {
 	if _, err := s.Create(RemovedMemberStoreKey(id), false, "", false, v2store.TTLOptionSet{ExpireTime: v2store.Permanent}); err != nil {
 		lg.Panic(
 			"failed to create removedMember",
 			zap.String("path", RemovedMemberStoreKey(id)),
-			zap.Error(err),
-		)
-	}
-}
-
-func mustUpdateMemberInStore(lg *zap.Logger, s v2store.Store, m *Member) {
-	b, err := json.Marshal(m.RaftAttributes)
-	if err != nil {
-		lg.Panic("failed to marshal raftAttributes", zap.Error(err))
-	}
-	p := path.Join(MemberStoreKey(m.ID), raftAttributesSuffix)
-	if _, err := s.Update(p, string(b), v2store.TTLOptionSet{ExpireTime: v2store.Permanent}); err != nil {
-		lg.Panic(
-			"failed to update raftAttributes",
-			zap.String("path", p),
 			zap.Error(err),
 		)
 	}
@@ -165,14 +186,14 @@ func nodeToMember(lg *zap.Logger, n *v2store.NodeExtern) (*Member, error) {
 	}
 	if data := attrs[raftAttrKey]; data != nil {
 		if err := json.Unmarshal(data, &m.RaftAttributes); err != nil {
-			return nil, fmt.Errorf("unmarshal raftAttributes error: %v", err)
+			return nil, fmt.Errorf("unmarshal raftAttributes error: %w", err)
 		}
 	} else {
 		return nil, fmt.Errorf("raftAttributes key doesn't exist")
 	}
 	if data := attrs[attrKey]; data != nil {
 		if err := json.Unmarshal(data, &m.Attributes); err != nil {
-			return m, fmt.Errorf("unmarshal attributes error: %v", err)
+			return m, fmt.Errorf("unmarshal attributes error: %w", err)
 		}
 	}
 	return m, nil
@@ -192,19 +213,4 @@ func MemberStoreKey(id types.ID) string {
 
 func MemberAttributesStorePath(id types.ID) string {
 	return path.Join(MemberStoreKey(id), attributesSuffix)
-}
-
-func clusterVersionFromStore(lg *zap.Logger, st v2store.Store) *semver.Version {
-	e, err := st.Get(path.Join(storePrefix, "version"), false, false)
-	if err != nil {
-		if isKeyNotFound(err) {
-			return nil
-		}
-		lg.Panic(
-			"failed to get cluster version from store",
-			zap.String("path", path.Join(storePrefix, "version")),
-			zap.Error(err),
-		)
-	}
-	return semver.Must(semver.NewVersion(*e.Node.Value))
 }

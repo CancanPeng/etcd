@@ -16,14 +16,15 @@ package resolver
 
 import (
 	"context"
+	"strings"
 	"sync"
-
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/client/v3/naming/endpoints"
 
 	"google.golang.org/grpc/codes"
 	gresolver "google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/status"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/naming/endpoints"
 )
 
 type builder struct {
@@ -31,9 +32,15 @@ type builder struct {
 }
 
 func (b builder) Build(target gresolver.Target, cc gresolver.ClientConn, opts gresolver.BuildOptions) (gresolver.Resolver, error) {
+	// Refer to https://github.com/grpc/grpc-go/blob/16d3df80f029f57cff5458f1d6da6aedbc23545d/clientconn.go#L1587-L1611
+	endpoint := target.URL.Path
+	if endpoint == "" {
+		endpoint = target.URL.Opaque
+	}
+	endpoint = strings.TrimPrefix(endpoint, "/")
 	r := &resolver{
 		c:      b.c,
-		target: target.Endpoint,
+		target: endpoint,
 		cc:     cc,
 	}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
@@ -93,22 +100,25 @@ func (r *resolver) watch() {
 				}
 			}
 
-			addrs := convertToGRPCAddress(allUps)
-			r.cc.UpdateState(gresolver.State{Addresses: addrs})
+			eps := convertToGRPCEndpoint(allUps)
+			r.cc.UpdateState(gresolver.State{Endpoints: eps})
 		}
 	}
 }
 
-func convertToGRPCAddress(ups map[string]*endpoints.Update) []gresolver.Address {
-	var addrs []gresolver.Address
+func convertToGRPCEndpoint(ups map[string]*endpoints.Update) []gresolver.Endpoint {
+	var eps []gresolver.Endpoint
 	for _, up := range ups {
-		addr := gresolver.Address{
-			Addr:     up.Endpoint.Addr,
-			Metadata: up.Endpoint.Metadata,
+		ep := gresolver.Endpoint{
+			Addresses: []gresolver.Address{
+				{
+					Addr: up.Endpoint.Addr,
+				},
+			},
 		}
-		addrs = append(addrs, addr)
+		eps = append(eps, ep)
 	}
-	return addrs
+	return eps
 }
 
 // ResolveNow is a no-op here.

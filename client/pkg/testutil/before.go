@@ -15,36 +15,32 @@
 package testutil
 
 import (
-	"io/ioutil"
 	"log"
 	"os"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"go.etcd.io/etcd/client/pkg/v3/verify"
 )
 
-func BeforeTest(t testing.TB) {
-	RegisterLeakDetection(t)
+func BeforeTest(tb testing.TB) {
+	tb.Helper()
+	RegisterLeakDetection(tb)
 
 	revertVerifyFunc := verify.EnableAllVerifications()
 
-	path, err := os.Getwd()
-	assert.NoError(t, err)
-	tempDir := t.TempDir()
-	assert.NoError(t, os.Chdir(tempDir))
-	t.Logf("Changing working directory to: %s", tempDir)
+	tempDir := tb.TempDir()
+	tb.Chdir(tempDir)
+	tb.Logf("Changing working directory to: %s", tempDir)
 
-	t.Cleanup(func() {
+	tb.Cleanup(func() {
 		revertVerifyFunc()
-		assert.NoError(t, os.Chdir(path))
 	})
 }
 
 func BeforeIntegrationExamples(*testing.M) func() {
 	ExitInShortMode("Skipping: the tests require real cluster")
 
-	tempDir, err := ioutil.TempDir(os.TempDir(), "etcd-integration")
+	tempDir, err := os.MkdirTemp(os.TempDir(), "etcd-integration")
 	if err != nil {
 		log.Printf("Failed to obtain tempDir: %v", tempDir)
 		os.Exit(1)

@@ -19,15 +19,15 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"go.etcd.io/etcd/api/v3/authpb"
-	"go.etcd.io/etcd/server/v3/storage/schema"
 	"go.uber.org/zap"
 
+	bolt "go.etcd.io/bbolt"
+	"go.etcd.io/etcd/api/v3/authpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/server/v3/lease/leasepb"
 	"go.etcd.io/etcd/server/v3/storage/backend"
-
-	bolt "go.etcd.io/bbolt"
+	"go.etcd.io/etcd/server/v3/storage/mvcc"
+	"go.etcd.io/etcd/server/v3/storage/schema"
 )
 
 func snapDir(dataDir string) string {
@@ -35,9 +35,9 @@ func snapDir(dataDir string) string {
 }
 
 func getBuckets(dbPath string) (buckets []string, err error) {
-	db, derr := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: flockTimeout})
+	db, derr := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: flockTimeout})
 	if derr != nil {
-		return nil, fmt.Errorf("failed to open bolt DB %v", derr)
+		return nil, fmt.Errorf("failed to open bolt DB %w", derr)
 	}
 	defer db.Close()
 
@@ -64,24 +64,12 @@ var decoders = map[string]decoder{
 	"meta":      metaDecoder,
 }
 
-type revision struct {
-	main int64
-	sub  int64
-}
-
-func bytesToRev(bytes []byte) revision {
-	return revision{
-		main: int64(binary.BigEndian.Uint64(bytes[0:8])),
-		sub:  int64(binary.BigEndian.Uint64(bytes[9:])),
-	}
-}
-
 func defaultDecoder(k, v []byte) {
 	fmt.Printf("key=%q, value=%q\n", k, v)
 }
 
 func keyDecoder(k, v []byte) {
-	rev := bytesToRev(k)
+	rev := mvcc.BytesToBucketKey(k)
 	var kv mvccpb.KeyValue
 	if err := kv.Unmarshal(v); err != nil {
 		panic(err)
@@ -114,7 +102,7 @@ func authDecoder(k, v []byte) {
 	}
 }
 
-func authRolesDecoder(k, v []byte) {
+func authRolesDecoder(_, v []byte) {
 	role := &authpb.Role{}
 	err := role.Unmarshal(v)
 	if err != nil {
@@ -123,7 +111,7 @@ func authRolesDecoder(k, v []byte) {
 	fmt.Printf("role=%q, keyPermission=%v\n", string(role.Name), role.KeyPermission)
 }
 
-func authUsersDecoder(k, v []byte) {
+func authUsersDecoder(_, v []byte) {
 	user := &authpb.User{}
 	err := user.Unmarshal(v)
 	if err != nil {
@@ -135,15 +123,18 @@ func authUsersDecoder(k, v []byte) {
 func metaDecoder(k, v []byte) {
 	if string(k) == string(schema.MetaConsistentIndexKeyName) || string(k) == string(schema.MetaTermKeyName) {
 		fmt.Printf("key=%q, value=%v\n", k, binary.BigEndian.Uint64(v))
+	} else if string(k) == string(schema.ScheduledCompactKeyName) || string(k) == string(schema.FinishedCompactKeyName) {
+		rev := mvcc.BytesToRev(v)
+		fmt.Printf("key=%q, value=%v\n", k, rev)
 	} else {
 		defaultDecoder(k, v)
 	}
 }
 
 func iterateBucket(dbPath, bucket string, limit uint64, decode bool) (err error) {
-	db, err := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: flockTimeout})
+	db, err := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: flockTimeout})
 	if err != nil {
-		return fmt.Errorf("failed to open bolt DB %v", err)
+		return fmt.Errorf("failed to open bolt DB %w", err)
 	}
 	defer db.Close()
 

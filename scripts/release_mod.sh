@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# Copyright 2025 The etcd Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Examples:
 
@@ -10,7 +23,7 @@
 #
 # % DRY_RUN=false REMOTE_REPO="origin" ./scripts/release_mod.sh push_mod_tags
 
-set -e
+set -euo pipefail
 
 source ./scripts/test_lib.sh
 
@@ -31,7 +44,7 @@ function update_module_version() {
   local v2version="${2}"
   local modules
   run go mod tidy
-  modules=$(run go list -f '{{if not .Main}}{{if not .Indirect}}{{.Path}}{{end}}{{end}}' -m all)
+  modules=$(go mod edit -json | jq -r '.Require[] | select(.Indirect | not) | .Path')
 
   v3deps=$(echo "${modules}" | grep -E "${ROOT_MODULE}/.*/v3")
   for dep in ${v3deps}; do
@@ -55,7 +68,7 @@ function mod_tidy_fix {
 function update_versions_cmd() {
   assert_no_git_modifications || return 2
 
-  if [ -z "${TARGET_VERSION}" ]; then
+  if [ -z "${TARGET_VERSION:-}" ]; then
     log_error "TARGET_VERSION environment variable not set. Set it to e.g. v3.5.10-alpha.0"
     return 2
   fi
@@ -89,7 +102,7 @@ function get_gpg_key {
 function push_mod_tags_cmd {
   assert_no_git_modifications || return 2
 
-  if [ -z "${REMOTE_REPO}" ]; then
+  if [ -z "${REMOTE_REPO:-}" ]; then
     log_error "REMOTE_REPO environment variable not set"
     return 2
   fi
@@ -97,16 +110,16 @@ function push_mod_tags_cmd {
 
   # Any module ccan be used for this
   local main_version
-  main_version=$(go list -f '{{.Version}}' -m "${ROOT_MODULE}/api/v3")
+  main_version=$(go mod edit -json | jq -r '.Require[] | select(.Path == "'"${ROOT_MODULE}"'/api/v3") | .Version')
   local tags=()
 
   keyid=$(get_gpg_key) || return 2
 
   for module in $(modules); do
     local version
-    version=$(go list -f '{{.Version}}' -m "${module}")
+    version=$(go mod edit -json | jq -r '.Require[] | select(.Path == "'"${module}"'") | .Version')
     local path
-    path=$(go list -f '{{.Path}}' -m "${module}")
+    path=$(go mod edit -json | jq -r '.Require[] | select(.Path == "'"${module}"'") | .Path')
     local subdir="${path//${ROOT_MODULE}\//}"
     local tag
     if [ -z "${version}" ]; then
@@ -121,7 +134,7 @@ function push_mod_tags_cmd {
     # consider main-module's tag as the latest.
     run sleep 2
     run git tag --local-user "${keyid}" --sign "${tag}" --message "${version}"
-    tags=("${tags[@]}" "${tag}")
+    tags+=("${tag}")
   done
   maybe_run git push -f "${REMOTE_REPO}" "${tags[@]}"
 }

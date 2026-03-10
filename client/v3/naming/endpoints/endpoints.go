@@ -29,10 +29,9 @@ type Endpoint struct {
 	// Since etcd 3.1
 	Addr string
 
-	// Metadata is the information associated with Addr, which may be used
-	// to make load balancing decision.
+	// Metadata is the information associated with Addr.
 	// Since etcd 3.1
-	Metadata interface{}
+	Metadata any
 }
 
 type Operation uint8

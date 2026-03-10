@@ -19,31 +19,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/testutils"
 )
 
 func TestDefragOnline(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	options := config.DefragOption{Timeout: 10 * time.Second}
-	clus := testRunner.NewCluster(ctx, t, config.ClusterConfig{ClusterSize: 3})
+	clus := testRunner.NewCluster(ctx, t)
+	cc := testutils.MustClient(clus.Client())
 	testutils.ExecuteUntil(ctx, t, func() {
 		defer clus.Close()
-		var kvs = []testutils.KV{{Key: "key", Val: "val1"}, {Key: "key", Val: "val2"}, {Key: "key", Val: "val3"}}
+		kvs := []testutils.KV{{Key: "key", Val: "val1"}, {Key: "key", Val: "val2"}, {Key: "key", Val: "val3"}}
 		for i := range kvs {
-			if err := clus.Client().Put(kvs[i].Key, kvs[i].Val, config.PutOptions{}); err != nil {
-				t.Fatalf("compactTest #%d: put kv error (%v)", i, err)
-			}
+			_, err := cc.Put(ctx, kvs[i].Key, kvs[i].Val, config.PutOptions{})
+			require.NoErrorf(t, err, "compactTest #%d: put kv error", i)
 		}
-		_, err := clus.Client().Compact(4, config.CompactOption{Physical: true, Timeout: 10 * time.Second})
-		if err != nil {
-			t.Fatalf("defrag_test: compact with revision error (%v)", err)
-		}
-
-		if err = clus.Client().Defragment(options); err != nil {
-			t.Fatalf("defrag_test: defrag error (%v)", err)
-		}
+		_, err := cc.Compact(ctx, 4, config.CompactOption{Physical: true, Timeout: 10 * time.Second})
+		require.NoErrorf(t, err, "defrag_test: compact with revision error (%v)", err)
+		require.NoErrorf(t, cc.Defragment(ctx, options), "defrag_test: defrag error (%v)", err)
 	})
 }

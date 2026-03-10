@@ -22,12 +22,12 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
+	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	"go.etcd.io/etcd/server/v3/storage/datadir"
 	"go.etcd.io/etcd/server/v3/storage/schema"
 	"go.etcd.io/etcd/server/v3/storage/wal"
-	"go.etcd.io/etcd/server/v3/storage/wal/walpb"
 )
 
 // NewMigrateCommand prints out the version of etcd.
@@ -74,8 +74,9 @@ func (o *migrateOptions) AddFlags(cmd *cobra.Command) {
 
 func (o *migrateOptions) Config() (*migrateConfig, error) {
 	c := &migrateConfig{
-		force: o.force,
-		lg:    GetLogger(),
+		force:   o.force,
+		dataDir: o.dataDir,
+		lg:      GetLogger(),
 	}
 	var err error
 	dotCount := strings.Count(o.targetVersion, ".")
@@ -84,24 +85,10 @@ func (o *migrateOptions) Config() (*migrateConfig, error) {
 	}
 	c.targetVersion, err = semver.NewVersion(o.targetVersion + ".0")
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse target version: %v", err)
+		return nil, fmt.Errorf("failed to parse target version: %w", err)
 	}
-	if c.targetVersion.LessThan(schema.V3_5) {
+	if c.targetVersion.LessThan(version.V3_5) {
 		return nil, fmt.Errorf(`target version %q not supported. Minimal "3.5"`, storageVersionToString(c.targetVersion))
-	}
-
-	dbPath := datadir.ToBackendFileName(o.dataDir)
-	c.be = backend.NewDefaultBackend(GetLogger(), dbPath)
-
-	walPath := datadir.ToWalDir(o.dataDir)
-	w, err := wal.OpenForRead(c.lg, walPath, walpb.Snapshot{})
-	if err != nil {
-		return nil, fmt.Errorf(`failed to open wal: %v`, err)
-	}
-	defer w.Close()
-	c.walVersion, err = wal.ReadWALVersion(w)
-	if err != nil {
-		return nil, fmt.Errorf(`failed to read wal: %v`, err)
 	}
 
 	return c, nil
@@ -109,16 +96,38 @@ func (o *migrateOptions) Config() (*migrateConfig, error) {
 
 type migrateConfig struct {
 	lg            *zap.Logger
-	be            backend.Backend
 	targetVersion *semver.Version
-	walVersion    schema.WALVersion
+	walVersion    wal.Version
+	dataDir       string
 	force         bool
 }
 
+func (c *migrateConfig) finalize() error {
+	walPath := datadir.ToWALDir(c.dataDir)
+	walSnap, err := getLatestWALSnap(c.lg, c.dataDir)
+	if err != nil {
+		return fmt.Errorf("failed to get the lastest snapshot: %w", err)
+	}
+	w, err := wal.OpenForRead(c.lg, walPath, walSnap)
+	if err != nil {
+		return fmt.Errorf(`failed to open wal: %w`, err)
+	}
+	defer w.Close()
+	c.walVersion, err = wal.ReadWALVersion(w)
+	if err != nil {
+		return fmt.Errorf(`failed to read wal: %w`, err)
+	}
+
+	return nil
+}
+
 func migrateCommandFunc(c *migrateConfig) error {
-	defer c.be.Close()
-	tx := c.be.BatchTx()
-	current, err := schema.DetectSchemaVersion(c.lg, c.be.ReadTx())
+	dbPath := datadir.ToBackendFileName(c.dataDir)
+	be := backend.NewDefaultBackend(GetLogger(), dbPath, backend.WithTimeout(FlockTimeout))
+	defer be.Close()
+
+	tx := be.BatchTx()
+	current, err := schema.DetectSchemaVersion(c.lg, be.ReadTx())
 	if err != nil {
 		c.lg.Error("failed to detect storage version. Please make sure you are using data dir from etcd v3.5 and older")
 		return err
@@ -127,6 +136,12 @@ func migrateCommandFunc(c *migrateConfig) error {
 		c.lg.Info("storage version up-to-date", zap.String("storage-version", storageVersionToString(&current)))
 		return nil
 	}
+
+	if err = c.finalize(); err != nil {
+		c.lg.Error("Failed to finalize config", zap.Error(err))
+		return err
+	}
+
 	err = schema.Migrate(c.lg, tx, c.walVersion, *c.targetVersion)
 	if err != nil {
 		if !c.force {
@@ -135,7 +150,7 @@ func migrateCommandFunc(c *migrateConfig) error {
 		c.lg.Info("normal migrate failed, trying with force", zap.Error(err))
 		migrateForce(c.lg, tx, c.targetVersion)
 	}
-	c.be.ForceCommit()
+	be.ForceCommit()
 	return nil
 }
 
@@ -143,7 +158,7 @@ func migrateForce(lg *zap.Logger, tx backend.BatchTx, target *semver.Version) {
 	tx.LockOutsideApply()
 	defer tx.Unlock()
 	// Storage version is only supported since v3.6
-	if target.LessThan(schema.V3_6) {
+	if target.LessThan(version.V3_6) {
 		schema.UnsafeClearStorageVersion(tx)
 		lg.Warn("forcefully cleared storage version")
 	} else {

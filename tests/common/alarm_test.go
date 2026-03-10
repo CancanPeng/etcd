@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/testutils"
@@ -28,46 +30,41 @@ import (
 
 func TestAlarm(t *testing.T) {
 	testRunner.BeforeTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	clus := testRunner.NewCluster(ctx, t, config.ClusterConfig{ClusterSize: 1, QuotaBackendBytes: int64(13 * os.Getpagesize())})
+	clus := testRunner.NewCluster(ctx, t,
+		config.WithClusterSize(1),
+		config.WithQuotaBackendBytes(int64(13*os.Getpagesize())),
+	)
 	defer clus.Close()
+	cc := testutils.MustClient(clus.Client())
 	testutils.ExecuteUntil(ctx, t, func() {
 		// test small put still works
 		smallbuf := strings.Repeat("a", 64)
-		if err := clus.Client().Put("1st_test", smallbuf, config.PutOptions{}); err != nil {
-			t.Fatalf("alarmTest: put kv error (%v)", err)
-		}
+		_, err := cc.Put(ctx, "1st_test", smallbuf, config.PutOptions{})
+		require.NoErrorf(t, err, "alarmTest: put kv error")
 
 		// write some chunks to fill up the database
 		buf := strings.Repeat("b", os.Getpagesize())
 		for {
-			if err := clus.Client().Put("2nd_test", buf, config.PutOptions{}); err != nil {
-				if !strings.Contains(err.Error(), "etcdserver: mvcc: database space exceeded") {
-					t.Fatal(err)
-				}
+			if _, err = cc.Put(ctx, "2nd_test", buf, config.PutOptions{}); err != nil {
+				require.ErrorContains(t, err, "etcdserver: mvcc: database space exceeded")
 				break
 			}
 		}
 
 		// quota alarm should now be on
-		alarmResp, err := clus.Client().AlarmList()
-		if err != nil {
-			t.Fatalf("alarmTest: Alarm error (%v)", err)
-		}
+		alarmResp, err := cc.AlarmList(ctx)
+		require.NoErrorf(t, err, "alarmTest: Alarm error")
 
 		// check that Put is rejected when alarm is on
-		if err := clus.Client().Put("3rd_test", smallbuf, config.PutOptions{}); err != nil {
-			if !strings.Contains(err.Error(), "etcdserver: mvcc: database space exceeded") {
-				t.Fatal(err)
-			}
+		if _, err = cc.Put(ctx, "3rd_test", smallbuf, config.PutOptions{}); err != nil {
+			require.ErrorContains(t, err, "etcdserver: mvcc: database space exceeded")
 		}
 
 		// get latest revision to compact
-		sresp, err := clus.Client().Status()
-		if err != nil {
-			t.Fatalf("get endpoint status error: %v", err)
-		}
+		sresp, err := cc.Status(ctx)
+		require.NoErrorf(t, err, "get endpoint status error")
 		var rvs int64
 		for _, resp := range sresp {
 			if resp != nil && resp.Header != nil {
@@ -77,14 +74,11 @@ func TestAlarm(t *testing.T) {
 		}
 
 		// make some space
-		_, err = clus.Client().Compact(rvs, config.CompactOption{Physical: true, Timeout: 10 * time.Second})
-		if err != nil {
-			t.Fatalf("alarmTest: Compact error (%v)", err)
-		}
+		_, err = cc.Compact(ctx, rvs, config.CompactOption{Physical: true, Timeout: 10 * time.Second})
+		require.NoErrorf(t, err, "alarmTest: Compact error")
 
-		if err = clus.Client().Defragment(config.DefragOption{Timeout: 10 * time.Second}); err != nil {
-			t.Fatalf("alarmTest: defrag error (%v)", err)
-		}
+		err = cc.Defragment(ctx, config.DefragOption{Timeout: 10 * time.Second})
+		require.NoErrorf(t, err, "alarmTest: defrag error")
 
 		// turn off alarm
 		for _, alarm := range alarmResp.Alarms {
@@ -92,15 +86,36 @@ func TestAlarm(t *testing.T) {
 				MemberID: alarm.MemberID,
 				Alarm:    alarm.Alarm,
 			}
-			_, err = clus.Client().AlarmDisarm(alarmMember)
-			if err != nil {
-				t.Fatalf("alarmTest: Alarm error (%v)", err)
-			}
+			_, err = cc.AlarmDisarm(ctx, alarmMember)
+			require.NoErrorf(t, err, "alarmTest: Alarm error")
 		}
 
 		// put one more key below quota
-		if err := clus.Client().Put("4th_test", smallbuf, config.PutOptions{}); err != nil {
-			t.Fatal(err)
+		_, err = cc.Put(ctx, "4th_test", smallbuf, config.PutOptions{})
+		require.NoError(t, err)
+	})
+}
+
+func TestAlarmlistOnMemberRestart(t *testing.T) {
+	testRunner.BeforeTest(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	clus := testRunner.NewCluster(ctx, t,
+		config.WithClusterSize(1),
+		config.WithQuotaBackendBytes(int64(13*os.Getpagesize())),
+		config.WithSnapshotCount(5),
+	)
+	defer clus.Close()
+	cc := testutils.MustClient(clus.Client())
+
+	testutils.ExecuteUntil(ctx, t, func() {
+		for i := 0; i < 6; i++ {
+			_, err := cc.AlarmList(ctx)
+			require.NoError(t, err)
 		}
+
+		clus.Members()[0].Stop()
+		err := clus.Members()[0].Start(ctx)
+		require.NoErrorf(t, err, "failed to start etcdserver")
 	})
 }

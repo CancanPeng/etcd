@@ -18,11 +18,13 @@ import (
 	"bytes"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"log"
+	"strings"
 	"sync"
 
-	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 // a key-value store backed by raft
@@ -63,7 +65,7 @@ func (s *kvstore) Lookup(key string) (string, bool) {
 }
 
 func (s *kvstore) Propose(k string, v string) {
-	var buf bytes.Buffer
+	var buf strings.Builder
 	if err := gob.NewEncoder(&buf).Encode(kv{k, v}); err != nil {
 		log.Fatal(err)
 	}
@@ -112,7 +114,7 @@ func (s *kvstore) getSnapshot() ([]byte, error) {
 
 func (s *kvstore) loadSnapshot() (*raftpb.Snapshot, error) {
 	snapshot, err := s.snapshotter.Load()
-	if err == snap.ErrNoSnapshot {
+	if errors.Is(err, snap.ErrNoSnapshot) {
 		return nil, nil
 	}
 	if err != nil {

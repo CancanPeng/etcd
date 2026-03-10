@@ -26,11 +26,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	pb "go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
-
-	"github.com/spf13/cobra"
 )
 
 func printKV(isHex bool, valueOnly bool, kv *pb.KeyValue) {
@@ -56,16 +56,17 @@ func addHexPrefix(s string) string {
 	return string(ns)
 }
 
+var argsRegexp = regexp.MustCompile(`"(?:[^"\\]|\\.)*"|'[^']*'|[^'"\s]\S*[^'"\s]?`)
+
 func Argify(s string) []string {
-	r := regexp.MustCompile(`"(?:[^"\\]|\\.)*"|'[^']*'|[^'"\s]\S*[^'"\s]?`)
-	args := r.FindAllString(s, -1)
+	args := argsRegexp.FindAllString(s, -1)
 	for i := range args {
 		if len(args[i]) == 0 {
 			continue
 		}
 		if args[i][0] == '\'' {
 			// 'single-quoted string'
-			args[i] = args[i][1 : len(args)-1]
+			args[i] = args[i][1 : len(args[i])-1]
 		} else if args[i][0] == '"' {
 			// "double quoted string"
 			if _, err := fmt.Sscanf(args[i], "%q", &args[i]); err != nil {
@@ -104,7 +105,7 @@ func endpointMemoryMetrics(host string, scfg *clientv3.SecureConfig) float64 {
 		// load client certificate
 		cert, err := tls.LoadX509KeyPair(scfg.Cert, scfg.Key)
 		if err != nil {
-			fmt.Println(fmt.Sprintf("client certificate error: %v", err))
+			fmt.Printf("client certificate error: %v\n", err)
 			return 0.0
 		}
 		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{
@@ -114,13 +115,13 @@ func endpointMemoryMetrics(host string, scfg *clientv3.SecureConfig) float64 {
 	}
 	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Println(fmt.Sprintf("fetch error: %v", err))
+		fmt.Printf("fetch error: %v\n", err)
 		return 0.0
 	}
 	byts, readerr := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if readerr != nil {
-		fmt.Println(fmt.Sprintf("fetch error: reading %s: %v", url, readerr))
+		fmt.Printf("fetch error: reading %s: %v\n", url, readerr)
 		return 0.0
 	}
 
@@ -131,12 +132,12 @@ func endpointMemoryMetrics(host string, scfg *clientv3.SecureConfig) float64 {
 		}
 	}
 	if residentMemoryValue == "" {
-		fmt.Println(fmt.Sprintf("could not find: %v", residentMemoryKey))
+		fmt.Printf("could not find: %v\n", residentMemoryKey)
 		return 0.0
 	}
 	residentMemoryBytes, parseErr := strconv.ParseFloat(residentMemoryValue, 64)
 	if parseErr != nil {
-		fmt.Println(fmt.Sprintf("parse error: %v", parseErr))
+		fmt.Printf("parse error: %v\n", parseErr)
 		return 0.0
 	}
 
@@ -165,4 +166,15 @@ func defrag(c *clientv3.Client, ep string) {
 		cobrautl.ExitWithError(cobrautl.ExitError, err)
 	}
 	fmt.Printf("Defragmented %q\n", ep)
+}
+
+func IsSerializable(option string) bool {
+	switch option {
+	case "s":
+		return true
+	case "l":
+	default:
+		cobrautl.ExitWithError(cobrautl.ExitBadFeature, fmt.Errorf("unknown consistency flag %q", getConsistency))
+	}
+	return false
 }

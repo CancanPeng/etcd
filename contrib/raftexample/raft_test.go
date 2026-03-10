@@ -15,9 +15,12 @@
 package main
 
 import (
-	"go.etcd.io/etcd/raft/v3/raftpb"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 func TestProcessMessages(t *testing.T) {
@@ -36,7 +39,7 @@ func TestProcessMessages(t *testing.T) {
 				{
 					Type: raftpb.MsgSnap,
 					To:   8,
-					Snapshot: raftpb.Snapshot{
+					Snapshot: &raftpb.Snapshot{
 						Metadata: raftpb.SnapshotMetadata{
 							Index: 100,
 							Term:  3,
@@ -52,7 +55,7 @@ func TestProcessMessages(t *testing.T) {
 				{
 					Type: raftpb.MsgSnap,
 					To:   8,
-					Snapshot: raftpb.Snapshot{
+					Snapshot: &raftpb.Snapshot{
 						Metadata: raftpb.SnapshotMetadata{
 							Index: 100,
 							Term:  3,
@@ -73,7 +76,7 @@ func TestProcessMessages(t *testing.T) {
 				{
 					Type: raftpb.MsgSnap,
 					To:   8,
-					Snapshot: raftpb.Snapshot{
+					Snapshot: &raftpb.Snapshot{
 						Metadata: raftpb.SnapshotMetadata{
 							Index: 100,
 							Term:  3,
@@ -94,7 +97,7 @@ func TestProcessMessages(t *testing.T) {
 				{
 					Type: raftpb.MsgSnap,
 					To:   8,
-					Snapshot: raftpb.Snapshot{
+					Snapshot: &raftpb.Snapshot{
 						Metadata: raftpb.SnapshotMetadata{
 							Index: 100,
 							Term:  3,
@@ -120,10 +123,7 @@ func TestProcessMessages(t *testing.T) {
 			}
 
 			outputMessages := rn.processMessages(tc.InputMessages)
-
-			if !reflect.DeepEqual(outputMessages, tc.ExpectedMessages) {
-				t.Fatalf("Unexpected messages, expected: %v, got %v", tc.ExpectedMessages, outputMessages)
-			}
+			require.Truef(t, reflect.DeepEqual(outputMessages, tc.ExpectedMessages), "Unexpected messages, expected: %v, got %v", tc.ExpectedMessages, outputMessages)
 		})
 	}
 }

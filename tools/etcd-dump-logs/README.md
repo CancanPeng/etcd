@@ -52,7 +52,10 @@ Flags:
 	    IRRRange, IRRPut, IRRDeleteRange, IRRTxn,
 	    IRRCompaction, IRRLeaseGrant, IRRLeaseRevoke
   -start-index uint
-    	The index to start dumping
+    	The index to start dumping (inclusive)
+      If unspecified, dumps from the index of the last snapshot.
+  -end-index uint
+      The index to stop dumping (exclusive)
   -start-snap string
     	The base name of snapshot file to start dumping
   -stream-decoder string
@@ -97,7 +100,7 @@ Entry types (ConfigChange,IRRCompaction) count is : 5
 ```
 #### etcd-dump-logs -stream-decoder <EXECUTABLE_DECODER> [data dir]
 
-Decode each entry based on logic in the passed decoder. Decoder status and decoded data are listed in separated tab/columns in the ouput. For parsing purpose, the output from decoder are expected to be in format of "<DECODER_STATUS>|<DECODED_DATA>". Please refer to [decoder_correctoutputformat.sh] as an example.
+Decode each entry based on logic in the passed decoder. Decoder status and decoded data are listed in separated tab/columns in the output. For parsing purpose, the output from decoder are expected to be in format of "<DECODER_STATUS>|<DECODED_DATA>". Please refer to [decoder_correctoutputformat.sh] as an example.
 
 However, if the decoder output format is not as expected, "decoder_status" will be "decoder output format is not right, print output anyway", and all output from decoder will be considered as "decoded_data"
 
@@ -146,11 +149,11 @@ Entry types () count is : 8
 ```
 ####  etcd-dump-logs -start-index <INDEX NUMBER> [data dir]
 
-Only shows WAL log entries after the specified start-index number, exclusively.
+Only shows WAL log entries after the specified start-index number, inclusively.
 
 ```
-$ etcd-dump-logs -start-index 30  /tmp/datadir
-Start dumping log entries from index 30.
+$ etcd-dump-logs -start-index 31  /tmp/datadir
+Start dumping log entries from index 31.
 WAL metadata:
 nodeID=0 clusterID=0 term=0 commitIndex=0 vote=0
 WAL entries:
@@ -162,4 +165,23 @@ term	     index	type	data
   27	        34	norm	???
 Entry types () count is : 4
 ```
+
+####  etcd-dump-logs -start-index <INDEX NUMBER> -end-index <INDEX NUMBER> [data dir]
+
+Only shows WAL log entries from the specified start-index number (inclusively) to the specified end-index number (exclusively).
+
+```
+$ etcd-dump-logs -start-index 930 -end-index 932  /tmp/datadir
+Start dumping log entries from index 930.
+WAL metadata:
+nodeID=0 clusterID=0 term=5 commitIndex=2448 vote=0
+WAL entries: 2
+lastIndex=931
+term	     index	type	data
+   3	       930	norm	header:<ID:11010058442592651283 > put:<key:"key7" value:"923" >
+   3	       931	norm	header:<ID:6577953459306661672 > put:<key:"key8" value:"924" >
+
+Entry types (Normal,ConfigChange) count is : 2
+```
+
 [decoder_correctoutputformat.sh]: ./testdecoder/decoder_correctoutputformat.sh

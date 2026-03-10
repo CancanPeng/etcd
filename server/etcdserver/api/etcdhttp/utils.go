@@ -15,12 +15,14 @@
 package etcdhttp
 
 import (
+	errorspkg "errors"
 	"net/http"
 
-	"go.etcd.io/etcd/server/v3/etcdserver"
+	"go.uber.org/zap"
+
 	httptypes "go.etcd.io/etcd/server/v3/etcdserver/api/etcdhttp/types"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v2error"
-	"go.uber.org/zap"
+	"go.etcd.io/etcd/server/v3/etcdserver/errors"
 )
 
 func allowMethod(w http.ResponseWriter, r *http.Request, m string) bool {
@@ -39,26 +41,31 @@ func writeError(lg *zap.Logger, w http.ResponseWriter, r *http.Request, err erro
 	if err == nil {
 		return
 	}
-	switch e := err.(type) {
-	case *v2error.Error:
-		e.WriteTo(w)
+	var v2Err *v2error.Error
+	var httpErr *httptypes.HTTPError
+	switch {
+	case errorspkg.As(err, &v2Err):
+		v2Err.WriteTo(w)
 
-	case *httptypes.HTTPError:
-		if et := e.WriteTo(w); et != nil {
+	case errorspkg.As(err, &httpErr):
+		if et := httpErr.WriteTo(w); et != nil {
 			if lg != nil {
 				lg.Debug(
 					"failed to write v2 HTTP error",
 					zap.String("remote-addr", r.RemoteAddr),
-					zap.String("internal-server-error", e.Error()),
+					zap.String("internal-server-error", httpErr.Error()),
 					zap.Error(et),
 				)
 			}
 		}
 
 	default:
-		switch err {
-		case etcdserver.ErrTimeoutDueToLeaderFail, etcdserver.ErrTimeoutDueToConnectionLost, etcdserver.ErrNotEnoughStartedMembers,
-			etcdserver.ErrUnhealthy:
+		switch {
+		case
+			errorspkg.Is(err, errors.ErrTimeoutDueToLeaderFail),
+			errorspkg.Is(err, errors.ErrTimeoutDueToConnectionLost),
+			errorspkg.Is(err, errors.ErrNotEnoughStartedMembers),
+			errorspkg.Is(err, errors.ErrUnhealthy):
 			if lg != nil {
 				lg.Warn(
 					"v2 response error",

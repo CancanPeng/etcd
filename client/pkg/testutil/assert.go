@@ -15,48 +15,37 @@
 package testutil
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func copyToInterface(msg ...string) []interface{} {
-	newMsg := make([]interface{}, len(msg))
-	for i, v := range msg {
-		newMsg[i] = v
-	}
-	return newMsg
-}
-
-func AssertNil(t *testing.T, v interface{}) {
+// AssertNil
+// Deprecated: use github.com/stretchr/testify/assert.Nil instead.
+func AssertNil(t *testing.T, v any) {
 	t.Helper()
 	assert.Nil(t, v)
 }
 
-func AssertNotNil(t *testing.T, v interface{}) {
+// AssertNotNil
+// Deprecated: use github.com/stretchr/testify/require.NotNil instead.
+func AssertNotNil(t *testing.T, v any) {
 	t.Helper()
 	if v == nil {
 		t.Fatalf("expected non-nil, got %+v", v)
 	}
 }
 
+// AssertTrue
+// Deprecated: use github.com/stretchr/testify/assert.True instead.
 func AssertTrue(t *testing.T, v bool, msg ...string) {
 	t.Helper()
-	newMsg := copyToInterface(msg...)
-	assert.Equal(t, true, v, newMsg)
+	assert.True(t, v, msg) //nolint:testifylint
 }
 
+// AssertFalse
+// Deprecated: use github.com/stretchr/testify/assert.False instead.
 func AssertFalse(t *testing.T, v bool, msg ...string) {
 	t.Helper()
-	newMsg := copyToInterface(msg...)
-	assert.Equal(t, false, v, newMsg)
-}
-
-func isNil(v interface{}) bool {
-	if v == nil {
-		return true
-	}
-	rv := reflect.ValueOf(v)
-	return rv.Kind() != reflect.Struct && rv.IsNil()
+	assert.False(t, v, msg) //nolint:testifylint
 }

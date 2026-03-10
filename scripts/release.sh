@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# Copyright 2025 The etcd Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -o errexit
 set -o nounset
@@ -33,29 +46,38 @@ help() {
   echo "WARNING: This does not perform the 'Add API capabilities', 'Performance testing' "
   echo "         or 'Documentation' steps. These steps must be performed manually BEFORE running this tool."
   echo ""
-  echo "WARNING: This script does not sign releases, publish releases to github or sent announcement"
-  echo "         emails. These steps must be performed manually AFTER running this tool."
+  echo "WARNING: This script does not send announcement emails. This step must be performed manually AFTER running this tool."
   echo ""
   echo "  args:"
   echo "    version: version of etcd to release, e.g. 'v3.2.18'"
   echo "  flags:"
-  echo "    --no-upload: skip gs://etcd binary artifact uploads."
+  echo "    --in-place: build binaries using current branch."
   echo "    --no-docker-push: skip docker image pushes."
+  echo "    --no-gh-release: skip creating the GitHub release using gh."
+  echo "    --no-upload: skip gs://etcd binary artifact uploads."
   echo ""
   echo "One can perform a (dry-run) test release from any (uncommitted) branch using:"
   echo "  DRY_RUN=true REPOSITORY=\`pwd\` BRANCH='local-branch-name' ./scripts/release 3.5.0-foobar.2"
 }
 
 main() {
-  VERSION=$1
-  if [[ ! "${VERSION}" =~ [0-9]+.[0-9]+.[0-9]+ ]]; then
+  # Allow to receive the version with the "v" prefix, i.e. v3.6.0.
+  VERSION=${1#v}
+  if [[ ! "${VERSION}" =~ ^[0-9]+.[0-9]+.[0-9]+ ]]; then
     log_error "Expected 'version' param of the form '<major-version>.<minor-version>.<patch-version>' but got '${VERSION}'"
     exit 1
   fi
   RELEASE_VERSION="v${VERSION}"
   MINOR_VERSION=$(echo "${VERSION}" | cut -d. -f 1-2)
-  BRANCH=${BRANCH:-"release-${MINOR_VERSION}"}
-  REPOSITORY=${REPOSITORY:-"https://github.com/etcd-io/etcd.git"}
+
+  if [ "${IN_PLACE}" == 1 ]; then
+      # Trigger release in current branch
+      REPOSITORY=$(pwd)
+      BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  else
+      REPOSITORY=${REPOSITORY:-"git@github.com:etcd-io/etcd.git"}
+      BRANCH=${BRANCH:-"release-${MINOR_VERSION}"}
+  fi
 
   log_warning "DRY_RUN=${DRY_RUN}"
   log_callout "RELEASE_VERSION=${RELEASE_VERSION}"
@@ -78,18 +100,21 @@ main() {
   # Set up release directory.
   local reldir="/tmp/etcd-release-${VERSION}"
   log_callout "Preparing temporary directory: ${reldir}"
-  if [ ! -d "${reldir}/etcd" ]; then
-    mkdir -p "${reldir}"
-    cd "${reldir}"
-    run git clone "${REPOSITORY}" --branch "${BRANCH}"
+  if [ "${IN_PLACE}" == 0 ]; then
+    if [ ! -d "${reldir}/etcd" ]; then
+      mkdir -p "${reldir}"
+      cd "${reldir}"
+      run git clone "${REPOSITORY}" --branch "${BRANCH}" --depth 1
+    fi
+    run cd "${reldir}/etcd" || exit 2
+    run git checkout "${BRANCH}" || exit 2
+    run git pull origin
+
+    git_assert_branch_in_sync || exit 2
   fi
-  run cd "${reldir}/etcd" || exit 2
+
   # mark local directory as root for test_lib scripts executions
   set_root_dir
-
-  run git checkout "${BRANCH}" || exit 2
-  run git pull origin
-  git_assert_branch_in_sync || exit 2
 
   # If a release version tag already exists, use it.
   local remote_tag_exists
@@ -101,15 +126,32 @@ main() {
   fi
 
   # Check go version.
+  log_callout "Check go version"
   local go_version current_go_version
-  go_version="go$(grep go-version .github/workflows/build.yaml | awk '{print $2}' | tr -d '"')"
+  go_version="go$(cat .go-version)"
   current_go_version=$(go version | awk '{ print $3 }')
   if [[ "${current_go_version}" != "${go_version}" ]]; then
-    log_error "Current go version is ${current_go_version}, but etcd ${RELEASE_VERSION} requires ${go_version} (see .travis.yml)."
+    log_error "Current go version is ${current_go_version}, but etcd ${RELEASE_VERSION} requires ${go_version} (see .go-version)."
     exit 1
   fi
 
+  if [ "${NO_GH_RELEASE}" == 1 ]; then
+    log_callout "Skipping gh verification, --no-gh-release is set"
+  else
+    # Check that gh is installed and logged in.
+    log_callout "Check gh installation"
+    if ! command -v gh >/dev/null; then
+      log_error "Cannot find gh. Please follow the installation instructions at https://github.com/cli/cli#installation"
+      exit 1
+    fi
+    if ! gh auth status &>/dev/null; then
+      log_error "GitHub authentication failed for gh. Please run gh auth login."
+      exit 1
+    fi
+  fi
+
   # If the release tag does not already exist remotely, create it.
+  log_callout "Create tag if not present"
   if [ "${remote_tag_exists}" -eq 0 ]; then
     # Bump version/version.go to release version.
     local source_version
@@ -143,34 +185,42 @@ main() {
       # shellcheck disable=SC2038,SC2046
       run git add $(find . -name go.mod ! -path './release/*'| xargs)
       run git diff --staged | cat
-      run git commit -m "version: bump up to ${VERSION}"
+      run git commit --signoff --message "version: bump up to ${VERSION}"
       run git diff --staged | cat
     fi
 
     # Push the version change if it's not already been pushed.
-    if [ "$DRY_RUN" != "true" ] && [ "$(git rev-list --count "origin/${BRANCH}..${BRANCH}")" -gt 0 ]; then
+    if [ "${DRY_RUN}" != "true" ] && [ "$(git rev-list --count "origin/${BRANCH}..${BRANCH}")" -gt 0 ]; then
       read -p "Push version bump up to ${VERSION} to '$(git remote get-url origin)' [y/N]? " -r confirm
       [[ "${confirm,,}" == "y" ]] || exit 1
       maybe_run git push
     fi
 
     # Tag release.
-    if [ "$(git tag --list | grep -c "${RELEASE_VERSION}")" -gt 0 ]; then
+    if git tag --list | grep --quiet "^${RELEASE_VERSION}$"; then
       log_callout "Skipping tag step. git tag ${RELEASE_VERSION} already exists."
     else
       log_callout "Tagging release..."
       REMOTE_REPO="origin" push_mod_tags_cmd
     fi
 
-    # Verify the version tag is on the right branch
-    # shellcheck disable=SC2155
-    local branch=$(git for-each-ref --contains "${RELEASE_VERSION}" --format="%(refname)" 'refs/heads' | cut -d '/' -f 3)
-    if [ "${branch}" != "${BRANCH}" ]; then
-      log_error "Error: Git tag ${RELEASE_VERSION} should be on branch '${BRANCH}' but is on '${branch}'"
-      exit 1
+    if [ "${IN_PLACE}" == 0 ]; then
+      # Tried with `local branch=$(git branch -a --contains tags/"${RELEASE_VERSION}")`
+      # so as to work with both current branch and main/release-3.X.
+      # But got error below on current branch mode,
+      # Error: Git tag v3.6.99 should be on branch '* (HEAD detached at pull/14860/merge)' but is on '* (HEAD detached from pull/14860/merge)'
+      #
+      # Verify the version tag is on the right branch
+      # shellcheck disable=SC2155
+      local branch=$(git for-each-ref --contains "${RELEASE_VERSION}" --format="%(refname)" 'refs/heads' | cut -d '/' -f 3)
+      if [ "${branch}" != "${BRANCH}" ]; then
+        log_error "Error: Git tag ${RELEASE_VERSION} should be on branch '${BRANCH}' but is on '${branch}'"
+        exit 1
+      fi
     fi
   fi
 
+  log_callout "Verify the latest commit has the version tag"
   # Verify the latest commit has the version tag
   # shellcheck disable=SC2155
   local tag="$(git describe --exact-match HEAD)"
@@ -179,6 +229,7 @@ main() {
     exit 1
   fi
 
+  log_callout "Verify the work space is clean"
   # Verify the clean working tree
   # shellcheck disable=SC2155
   local diff="$(git diff HEAD --stat)"
@@ -215,8 +266,8 @@ main() {
   fi
 
   # Upload artifacts.
-  if [ "${NO_UPLOAD}" == 1 ]; then
-    log_callout "Skipping artifact upload to gs://etcd. --no-upload flat is set."
+  if [ "${DRY_RUN}" == "true" ] || [ "${NO_UPLOAD}" == 1 ]; then
+    log_callout "Skipping artifact upload to gs://etcd. --no-upload flag is set."
   else
     read -p "Upload etcd ${RELEASE_VERSION} release artifacts to gs://etcd [y/N]? " -r confirm
     [[ "${confirm,,}" == "y" ]] || exit 1
@@ -227,8 +278,8 @@ main() {
   fi
 
   # Push images.
-  if [ "${NO_DOCKER_PUSH}" == 1 ]; then
-    log_callout "Skipping docker push. --no-docker-push flat is set."
+  if [ "${DRY_RUN}" == "true" ] || [ "${NO_DOCKER_PUSH}" == 1 ]; then
+    log_callout "Skipping docker push. --no-docker-push flag is set."
   else
     read -p "Publish etcd ${RELEASE_VERSION} docker images to quay.io [y/N]? " -r confirm
     [[ "${confirm,,}" == "y" ]] || exit 1
@@ -260,9 +311,6 @@ main() {
 
     log_callout "Pushing container manifest list to gcr.io ${RELEASE_VERSION}"
     maybe_run docker manifest push "gcr.io/etcd-development/etcd:${RELEASE_VERSION}"
-
-    log_callout "Setting permissions using gsutil..."
-    maybe_run gsutil -m acl ch -u allUsers:R -r gs://artifacts.etcd-development.appspot.com
   fi
 
   ### Release validation
@@ -297,10 +345,71 @@ main() {
     exit 1
   fi
 
-  # TODO: signing process
-  log_warning ""
-  log_warning "WARNING: The release has not been signed and published to github. This must be done manually."
-  log_warning ""
+  if [ "${DRY_RUN}" == "true" ] || [ "${NO_GH_RELEASE}" == 1 ]; then
+    log_warning ""
+    log_warning "WARNING: Skipping creating GitHub release, --no-gh-release is set."
+    log_warning "WARNING: If not running on DRY_MODE, please do the GitHub release manually."
+    log_warning ""
+  else
+    local gh_repo
+    local release_notes_temp_file
+    local release_url
+    local gh_release_args=()
+
+    # For the main branch (v3.6), we should mark the release as a prerelease.
+    # The release-3.5 (v3.5) branch, should be marked as latest. And release-3.4 (v3.4)
+    # should be left without any additional mark (therefore, it doesn't need a special argument).
+    if [ "${BRANCH}" = "main" ]; then
+      gh_release_args=(--prerelease)
+    elif [ "${BRANCH}" = "release-3.5" ]; then
+      gh_release_args=(--latest)
+    fi
+
+    if [ "${REPOSITORY}" = "$(pwd)" ]; then
+      gh_repo=$(git remote get-url origin)
+    else
+      gh_repo="${REPOSITORY}"
+    fi
+
+    gh_repo=$(echo "${gh_repo}" | sed 's/^[^@]\+@//' | sed 's/https\?:\/\///' | sed 's/\.git$//' | tr ':' '/')
+    log_callout "Creating GitHub release for ${RELEASE_VERSION} on ${gh_repo}"
+
+    release_notes_temp_file=$(mktemp)
+
+    local release_version=${RELEASE_VERSION#v} # Remove the v prefix from the release version (i.e., v3.6.1 -> 3.6.1)
+    local release_version_major_minor
+    release_version_major_minor=$(echo "${release_version}" | cut -d. -f1-2) # Remove the patch from the version (i.e., 3.6)
+    local release_version_major=${release_version_major_minor%.*} # Extract the major (i.e., 3)
+    local release_version_minor=${release_version_major_minor/*./} # Extract the minor (i.e., 6)
+
+    # Disable sellcheck SC2016, the single quoted syntax for sed is intentional.
+    # shellcheck disable=SC2016
+    sed 's/${RELEASE_VERSION}/'"${RELEASE_VERSION}"'/g' ./scripts/release_notes.tpl.txt |
+      sed 's/${RELEASE_VERSION_MAJOR_MINOR}/'"${release_version_major_minor}"'/g' |
+      sed 's/${RELEASE_VERSION_MAJOR}/'"${release_version_major}"'/g' |
+      sed 's/${RELEASE_VERSION_MINOR}/'"${release_version_minor}"'/g' > "${release_notes_temp_file}"
+
+    if ! gh --repo "${gh_repo}" release view "${RELEASE_VERSION}" &>/dev/null; then
+      maybe_run gh release create "${RELEASE_VERSION}" \
+          --repo "${gh_repo}" \
+          --draft \
+          --title "${RELEASE_VERSION}" \
+          --notes-file "${release_notes_temp_file}" \
+          "${gh_release_args[@]}"
+    fi
+
+    # Upload files one by one, as gh doesn't support passing globs as input.
+    maybe_run find ./release '(' -name '*.tar.gz' -o -name '*.zip' ')' -exec \
+      gh --repo "${gh_repo}" release upload "${RELEASE_VERSION}" {} --clobber \;
+    maybe_run gh --repo "${gh_repo}" release upload "${RELEASE_VERSION}" ./release/SHA256SUMS --clobber
+
+    release_url=$(gh --repo "${gh_repo}" release view "${RELEASE_VERSION}" --json url --jq '.url')
+
+    log_warning ""
+    log_warning "WARNING: The GitHub release for ${RELEASE_VERSION} has been created as a draft, please go to ${release_url} and release it."
+    log_warning ""
+  fi
+
   log_success "Success."
   exit 0
 }
@@ -308,6 +417,8 @@ main() {
 POSITIONAL=()
 NO_UPLOAD=0
 NO_DOCKER_PUSH=0
+IN_PLACE=0
+NO_GH_RELEASE=0
 
 while test $# -gt 0; do
         case "$1" in
@@ -316,12 +427,20 @@ while test $# -gt 0; do
             help
             exit 0
             ;;
+          --in-place)
+            IN_PLACE=1
+            shift
+            ;;
           --no-upload)
             NO_UPLOAD=1
             shift
             ;;
           --no-docker-push)
             NO_DOCKER_PUSH=1
+            shift
+            ;;
+          --no-gh-release)
+            NO_GH_RELEASE=1
             shift
             ;;
           *)
@@ -335,6 +454,13 @@ set -- "${POSITIONAL[@]}" # restore positional parameters
 if [[ ! $# -eq 1 ]]; then
   help
   exit 1
+fi
+
+# Note that we shouldn't upload artifacts in --in-place mode, so it
+# must be called with DRY_RUN=true
+if [ "${DRY_RUN}" != "true" ] && [ "${IN_PLACE}" == 1 ]; then
+   log_error "--in-place should only be called with DRY_RUN=true"
+   exit 1
 fi
 
 main "$1"

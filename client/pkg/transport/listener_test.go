@@ -15,23 +15,32 @@
 package transport
 
 import (
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 )
 
-func createSelfCert(t *testing.T, hosts ...string) (*TLSInfo, error) {
+func createSelfCert(t *testing.T) (*TLSInfo, error) {
+	t.Helper()
 	return createSelfCertEx(t, "127.0.0.1")
 }
 
 func createSelfCertEx(t *testing.T, host string, additionalUsages ...x509.ExtKeyUsage) (*TLSInfo, error) {
+	t.Helper()
 	d := t.TempDir()
 	info, err := SelfCert(zaptest.NewLogger(t), d, []string{host + ":0"}, 1, additionalUsages...)
 	if err != nil {
@@ -40,9 +49,9 @@ func createSelfCertEx(t *testing.T, host string, additionalUsages ...x509.ExtKey
 	return &info, nil
 }
 
-func fakeCertificateParserFunc(cert tls.Certificate, err error) func(certPEMBlock, keyPEMBlock []byte) (tls.Certificate, error) {
+func fakeCertificateParserFunc(err error) func(certPEMBlock, keyPEMBlock []byte) (tls.Certificate, error) {
 	return func(certPEMBlock, keyPEMBlock []byte) (tls.Certificate, error) {
-		return cert, err
+		return tls.Certificate{}, err
 	}
 }
 
@@ -50,17 +59,13 @@ func fakeCertificateParserFunc(cert tls.Certificate, err error) func(certPEMBloc
 // a TLS listener that accepts TLS connections.
 func TestNewListenerTLSInfo(t *testing.T) {
 	tlsInfo, err := createSelfCert(t)
-	if err != nil {
-		t.Fatalf("unable to create cert: %v", err)
-	}
+	require.NoErrorf(t, err, "unable to create cert")
 	testNewListenerTLSInfoAccept(t, *tlsInfo)
 }
 
 func TestNewListenerWithOpts(t *testing.T) {
 	tlsInfo, err := createSelfCert(t)
-	if err != nil {
-		t.Fatalf("unable to create cert: %v", err)
-	}
+	require.NoErrorf(t, err, "unable to create cert")
 
 	tests := map[string]struct {
 		opts        []ListenerOption
@@ -107,11 +112,9 @@ func TestNewListenerWithOpts(t *testing.T) {
 			if ln != nil {
 				defer ln.Close()
 			}
-			if test.expectedErr && err == nil {
-				t.Fatalf("expected error")
-			}
-			if !test.expectedErr && err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			require.Falsef(t, test.expectedErr && err == nil, "expected error")
+			if !test.expectedErr {
+				require.NoErrorf(t, err, "unexpected error: %v", err)
 			}
 		})
 	}
@@ -119,9 +122,7 @@ func TestNewListenerWithOpts(t *testing.T) {
 
 func TestNewListenerWithSocketOpts(t *testing.T) {
 	tlsInfo, err := createSelfCert(t)
-	if err != nil {
-		t.Fatalf("unable to create cert: %v", err)
-	}
+	require.NoErrorf(t, err, "unable to create cert")
 
 	tests := map[string]struct {
 		opts        []ListenerOption
@@ -191,29 +192,34 @@ func TestNewListenerWithSocketOpts(t *testing.T) {
 	for testName, test := range tests {
 		t.Run(testName, func(t *testing.T) {
 			ln, err := NewListenerWithOpts("127.0.0.1:0", test.scheme, test.opts...)
-			if err != nil {
-				t.Fatalf("unexpected NewListenerWithSocketOpts error: %v", err)
-			}
+			require.NoErrorf(t, err, "unexpected NewListenerWithSocketOpts error")
 			defer ln.Close()
 			ln2, err := NewListenerWithOpts(ln.Addr().String(), test.scheme, test.opts...)
 			if ln2 != nil {
 				ln2.Close()
 			}
-			if test.expectedErr && err == nil {
-				t.Fatalf("expected error")
+			if test.expectedErr {
+				require.Errorf(t, err, "expected error")
 			}
-			if !test.expectedErr && err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			if !test.expectedErr {
+				require.NoErrorf(t, err, "unexpected error: %v", err)
+			}
+
+			if test.scheme == "http" {
+				lnOpts := newListenOpts(test.opts...)
+				if !lnOpts.IsSocketOpts() && !lnOpts.IsTimeout() {
+					_, ok := ln.(*keepaliveListener)
+					require.Truef(t, ok, "ln: unexpected listener type: %T, wanted *keepaliveListener", ln)
+				}
 			}
 		})
 	}
 }
 
 func testNewListenerTLSInfoAccept(t *testing.T, tlsInfo TLSInfo) {
+	t.Helper()
 	ln, err := NewListener("127.0.0.1:0", "https", &tlsInfo)
-	if err != nil {
-		t.Fatalf("unexpected NewListener error: %v", err)
-	}
+	require.NoErrorf(t, err, "unexpected NewListener error")
 	defer ln.Close()
 
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
@@ -221,9 +227,7 @@ func testNewListenerTLSInfoAccept(t *testing.T, tlsInfo TLSInfo) {
 	go cli.Get("https://" + ln.Addr().String())
 
 	conn, err := ln.Accept()
-	if err != nil {
-		t.Fatalf("unexpected Accept error: %v", err)
-	}
+	require.NoErrorf(t, err, "unexpected Accept error")
 	defer conn.Close()
 	if _, ok := conn.(*tls.Conn); !ok {
 		t.Error("failed to accept *tls.Conn")
@@ -250,34 +254,27 @@ func TestNewListenerTLSInfoSkipClientSANVerify(t *testing.T) {
 }
 
 func testNewListenerTLSInfoClientCheck(t *testing.T, skipClientSANVerify, goodClientHost, acceptExpected bool) {
+	t.Helper()
 	tlsInfo, err := createSelfCert(t)
-	if err != nil {
-		t.Fatalf("unable to create cert: %v", err)
-	}
+	require.NoErrorf(t, err, "unable to create cert")
 
 	host := "127.0.0.222"
 	if goodClientHost {
 		host = "127.0.0.1"
 	}
 	clientTLSInfo, err := createSelfCertEx(t, host, x509.ExtKeyUsageClientAuth)
-	if err != nil {
-		t.Fatalf("unable to create cert: %v", err)
-	}
+	require.NoErrorf(t, err, "unable to create cert")
 
 	tlsInfo.SkipClientSANVerify = skipClientSANVerify
 	tlsInfo.TrustedCAFile = clientTLSInfo.CertFile
 
 	rootCAs := x509.NewCertPool()
 	loaded, err := os.ReadFile(tlsInfo.CertFile)
-	if err != nil {
-		t.Fatalf("unexpected missing certfile: %v", err)
-	}
+	require.NoErrorf(t, err, "unexpected missing certfile")
 	rootCAs.AppendCertsFromPEM(loaded)
 
 	clientCert, err := tls.LoadX509KeyPair(clientTLSInfo.CertFile, clientTLSInfo.KeyFile)
-	if err != nil {
-		t.Fatalf("unable to create peer cert: %v", err)
-	}
+	require.NoErrorf(t, err, "unable to create peer cert")
 
 	tlsConfig := &tls.Config{}
 	tlsConfig.InsecureSkipVerify = false
@@ -285,9 +282,7 @@ func testNewListenerTLSInfoClientCheck(t *testing.T, skipClientSANVerify, goodCl
 	tlsConfig.RootCAs = rootCAs
 
 	ln, err := NewListener("127.0.0.1:0", "https", tlsInfo)
-	if err != nil {
-		t.Fatalf("unexpected NewListener error: %v", err)
-	}
+	require.NoErrorf(t, err, "unexpected NewListener error")
 	defer ln.Close()
 
 	tr := &http.Transport{TLSClientConfig: tlsConfig}
@@ -336,9 +331,7 @@ func TestNewListenerTLSEmptyInfo(t *testing.T) {
 
 func TestNewTransportTLSInfo(t *testing.T) {
 	tlsinfo, err := createSelfCert(t)
-	if err != nil {
-		t.Fatalf("unable to create cert: %v", err)
-	}
+	require.NoErrorf(t, err, "unable to create cert")
 
 	tests := []TLSInfo{
 		{},
@@ -357,15 +350,10 @@ func TestNewTransportTLSInfo(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		tt.parseFunc = fakeCertificateParserFunc(tls.Certificate{}, nil)
+		tt.parseFunc = fakeCertificateParserFunc(nil)
 		trans, err := NewTransport(tt, time.Second)
-		if err != nil {
-			t.Fatalf("Received unexpected error from NewTransport: %v", err)
-		}
-
-		if trans.TLSClientConfig == nil {
-			t.Fatalf("#%d: want non-nil TLSClientConfig", i)
-		}
+		require.NoErrorf(t, err, "Received unexpected error from NewTransport")
+		require.NotNilf(t, trans.TLSClientConfig, "#%d: want non-nil TLSClientConfig", i)
 	}
 }
 
@@ -407,9 +395,7 @@ func TestTLSInfoEmpty(t *testing.T) {
 
 func TestTLSInfoMissingFields(t *testing.T) {
 	tlsinfo, err := createSelfCert(t)
-	if err != nil {
-		t.Fatalf("unable to create cert: %v", err)
-	}
+	require.NoErrorf(t, err, "unable to create cert")
 
 	tests := []TLSInfo{
 		{CertFile: tlsinfo.CertFile},
@@ -431,9 +417,7 @@ func TestTLSInfoMissingFields(t *testing.T) {
 
 func TestTLSInfoParseFuncError(t *testing.T) {
 	tlsinfo, err := createSelfCert(t)
-	if err != nil {
-		t.Fatalf("unable to create cert: %v", err)
-	}
+	require.NoErrorf(t, err, "unable to create cert")
 
 	tests := []struct {
 		info TLSInfo
@@ -448,7 +432,7 @@ func TestTLSInfoParseFuncError(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		tt.info.parseFunc = fakeCertificateParserFunc(tls.Certificate{}, errors.New("fake"))
+		tt.info.parseFunc = fakeCertificateParserFunc(errors.New("fake"))
 
 		if _, err = tt.info.ServerConfig(); err == nil {
 			t.Errorf("#%d: expected non-nil error from ServerConfig()", i)
@@ -463,9 +447,7 @@ func TestTLSInfoParseFuncError(t *testing.T) {
 func TestTLSInfoConfigFuncs(t *testing.T) {
 	ln := zaptest.NewLogger(t)
 	tlsinfo, err := createSelfCert(t)
-	if err != nil {
-		t.Fatalf("unable to create cert: %v", err)
-	}
+	require.NoErrorf(t, err, "unable to create cert")
 
 	tests := []struct {
 		info       TLSInfo
@@ -486,7 +468,7 @@ func TestTLSInfoConfigFuncs(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		tt.info.parseFunc = fakeCertificateParserFunc(tls.Certificate{}, nil)
+		tt.info.parseFunc = fakeCertificateParserFunc(nil)
 
 		sCfg, err := tt.info.ServerConfig()
 		if err != nil {
@@ -519,14 +501,15 @@ func TestNewListenerUnixSocket(t *testing.T) {
 // TestNewListenerTLSInfoSelfCert tests that a new certificate accepts connections.
 func TestNewListenerTLSInfoSelfCert(t *testing.T) {
 	tmpdir := t.TempDir()
+
 	tlsinfo, err := SelfCert(zaptest.NewLogger(t), tmpdir, []string{"127.0.0.1"}, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tlsinfo.Empty() {
-		t.Fatalf("tlsinfo should have certs (%+v)", tlsinfo)
-	}
+	require.NoError(t, err)
+	require.Falsef(t, tlsinfo.Empty(), "tlsinfo should have certs (%+v)", tlsinfo)
 	testNewListenerTLSInfoAccept(t, tlsinfo)
+
+	assert.Panicsf(t, func() {
+		SelfCert(nil, tmpdir, []string{"127.0.0.1"}, 1)
+	}, "expected panic with nil log")
 }
 
 func TestIsClosedConnError(t *testing.T) {
@@ -536,9 +519,7 @@ func TestIsClosedConnError(t *testing.T) {
 	}
 	l.Close()
 	_, err = l.Accept()
-	if !IsClosedConnError(err) {
-		t.Fatalf("expect true, got false (%v)", err)
-	}
+	require.Truef(t, IsClosedConnError(err), "expect true, got false (%v)", err)
 }
 
 func TestSocktOptsEmpty(t *testing.T) {
@@ -556,5 +537,140 @@ func TestSocktOptsEmpty(t *testing.T) {
 		if tt.want != got {
 			t.Errorf("#%d: result of Empty() incorrect: want=%t got=%t", i, tt.want, got)
 		}
+	}
+}
+
+// TestNewListenerWithACRLFile tests when a revocation list is present.
+func TestNewListenerWithACRLFile(t *testing.T) {
+	clientTLSInfo, err := createSelfCertEx(t, "127.0.0.1", x509.ExtKeyUsageClientAuth)
+	require.NoErrorf(t, err, "unable to create client cert")
+
+	loadFileAsPEM := func(fileName string) []byte {
+		loaded, readErr := os.ReadFile(fileName)
+		require.NoErrorf(t, readErr, "unable to read file %q", fileName)
+		block, _ := pem.Decode(loaded)
+		return block.Bytes
+	}
+
+	clientCert, err := x509.ParseCertificate(loadFileAsPEM(clientTLSInfo.CertFile))
+	require.NoErrorf(t, err, "unable to parse client cert")
+
+	tests := map[string]struct {
+		expectHandshakeError      bool
+		revokedCertificateEntries []x509.RevocationListEntry
+		revocationListContents    []byte
+	}{
+		"empty revocation list": {
+			expectHandshakeError: false,
+		},
+		"client cert is revoked": {
+			expectHandshakeError: true,
+			revokedCertificateEntries: []x509.RevocationListEntry{
+				{
+					SerialNumber:   clientCert.SerialNumber,
+					RevocationTime: time.Now(),
+				},
+			},
+		},
+		"invalid CRL file content": {
+			expectHandshakeError:   true,
+			revocationListContents: []byte("@invalidcontent"),
+		},
+	}
+
+	for testName, test := range tests {
+		t.Run(testName, func(t *testing.T) {
+			tmpdir := t.TempDir()
+			tlsInfo, err := createSelfCert(t)
+			require.NoErrorf(t, err, "unable to create server cert")
+			tlsInfo.TrustedCAFile = clientTLSInfo.CertFile
+			tlsInfo.CRLFile = filepath.Join(tmpdir, "revoked.r0")
+
+			cert, err := x509.ParseCertificate(loadFileAsPEM(tlsInfo.CertFile))
+			require.NoErrorf(t, err, "unable to decode server cert")
+
+			key, err := x509.ParseECPrivateKey(loadFileAsPEM(tlsInfo.KeyFile))
+			require.NoErrorf(t, err, "unable to parse server key")
+
+			revocationListContents := test.revocationListContents
+			if len(revocationListContents) == 0 {
+				tmpl := &x509.RevocationList{
+					RevokedCertificateEntries: test.revokedCertificateEntries,
+					ThisUpdate:                time.Now(),
+					NextUpdate:                time.Now().Add(time.Hour),
+					Number:                    big.NewInt(1),
+				}
+				revocationListContents, err = x509.CreateRevocationList(rand.Reader, tmpl, cert, key)
+				require.NoErrorf(t, err, "unable to create revocation list")
+			}
+
+			err = os.WriteFile(tlsInfo.CRLFile, revocationListContents, 0o600)
+			require.NoErrorf(t, err, "unable to write revocation list")
+
+			chHandshakeFailure := make(chan error, 1)
+			tlsInfo.HandshakeFailure = func(_ *tls.Conn, err error) {
+				if err != nil {
+					chHandshakeFailure <- err
+				}
+			}
+
+			rootCAs := x509.NewCertPool()
+			rootCAs.AddCert(cert)
+
+			clientCert, err := tls.LoadX509KeyPair(clientTLSInfo.CertFile, clientTLSInfo.KeyFile)
+			require.NoErrorf(t, err, "unable to create peer cert")
+
+			ln, err := NewListener("127.0.0.1:0", "https", tlsInfo)
+			require.NoErrorf(t, err, "unable to start listener")
+
+			tlsConfig := &tls.Config{}
+			tlsConfig.InsecureSkipVerify = false
+			tlsConfig.Certificates = []tls.Certificate{clientCert}
+			tlsConfig.RootCAs = rootCAs
+
+			tr := &http.Transport{TLSClientConfig: tlsConfig}
+			cli := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				if _, gerr := cli.Get("https://" + ln.Addr().String()); gerr != nil {
+					t.Logf("http GET failed: %v", gerr)
+				}
+			}()
+
+			chAcceptConn := make(chan net.Conn, 1)
+			go func() {
+				defer wg.Done()
+				conn, err := ln.Accept()
+				if err == nil {
+					chAcceptConn <- conn
+				}
+			}()
+
+			timer := time.NewTimer(5 * time.Second)
+			defer func() {
+				if !timer.Stop() {
+					<-timer.C
+				}
+			}()
+
+			select {
+			case err := <-chHandshakeFailure:
+				if !test.expectHandshakeError {
+					t.Errorf("expecting no handshake error, got: %v", err)
+				}
+			case conn := <-chAcceptConn:
+				if test.expectHandshakeError {
+					t.Errorf("expecting handshake error, got nothing")
+				}
+				conn.Close()
+			case <-timer.C:
+				t.Error("timed out waiting for closed connection or handshake error")
+			}
+
+			ln.Close()
+			wg.Wait()
+		})
 	}
 }

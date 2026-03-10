@@ -18,27 +18,43 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/client/v3"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/pkg/v3/expect"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 )
 
-func TestCtlV3MoveLeaderSecure(t *testing.T) {
-	testCtlV3MoveLeader(t, *e2e.NewConfigTLS())
+func TestCtlV3MoveLeaderScenarios(t *testing.T) {
+	securityParent := map[string]struct {
+		cfg e2e.EtcdProcessClusterConfig
+	}{
+		"Secure":   {cfg: *e2e.NewConfigTLS()},
+		"Insecure": {cfg: *e2e.NewConfigNoTLS()},
+	}
+
+	tests := map[string]struct {
+		env map[string]string
+	}{
+		"happy path": {env: map[string]string{}},
+		"with env":   {env: map[string]string{"ETCDCTL_ENDPOINTS": "something-else-is-set"}},
+	}
+
+	for testName, tc := range securityParent {
+		for subTestName, tx := range tests {
+			t.Run(testName+" "+subTestName, func(t *testing.T) {
+				testCtlV3MoveLeader(t, tc.cfg, tx.env)
+			})
+		}
+	}
 }
 
-func TestCtlV3MoveLeaderInsecure(t *testing.T) {
-	testCtlV3MoveLeader(t, *e2e.NewConfigNoTLS())
-}
-
-func testCtlV3MoveLeader(t *testing.T, cfg e2e.EtcdProcessClusterConfig) {
-	e2e.BeforeTest(t)
-
+func testCtlV3MoveLeader(t *testing.T, cfg e2e.EtcdProcessClusterConfig, envVars map[string]string) {
 	epc := setupEtcdctlTest(t, &cfg, true)
 	defer func() {
 		if errC := epc.Close(); errC != nil {
@@ -47,7 +63,7 @@ func testCtlV3MoveLeader(t *testing.T, cfg e2e.EtcdProcessClusterConfig) {
 	}()
 
 	var tcfg *tls.Config
-	if cfg.ClientTLS == e2e.ClientTLS {
+	if cfg.Client.ConnectionType == e2e.ClientTLS {
 		tinfo := transport.TLSInfo{
 			CertFile:      e2e.CertPath,
 			KeyFile:       e2e.PrivateKeyPath,
@@ -55,24 +71,20 @@ func testCtlV3MoveLeader(t *testing.T, cfg e2e.EtcdProcessClusterConfig) {
 		}
 		var err error
 		tcfg, err = tinfo.ClientConfig()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 	}
 
 	var leadIdx int
 	var leaderID uint64
 	var transferee uint64
-	for i, ep := range epc.EndpointsV3() {
+	for i, ep := range epc.EndpointsGRPC() {
 		cli, err := clientv3.New(clientv3.Config{
 			Endpoints:   []string{ep},
 			DialTimeout: 3 * time.Second,
 			TLS:         tcfg,
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		require.NoError(t, err)
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		resp, err := cli.Status(ctx, ep)
 		if err != nil {
 			t.Fatalf("failed to get status from endpoint %s: %v", ep, err)
@@ -88,33 +100,43 @@ func testCtlV3MoveLeader(t *testing.T, cfg e2e.EtcdProcessClusterConfig) {
 		}
 	}
 
-	os.Setenv("ETCDCTL_API", "3")
-	defer os.Unsetenv("ETCDCTL_API")
 	cx := ctlCtx{
 		t:           t,
 		cfg:         *e2e.NewConfigNoTLS(),
 		dialTimeout: 7 * time.Second,
 		epc:         epc,
+		envMap:      envVars,
 	}
 
 	tests := []struct {
-		eps    []string
-		expect string
+		eps       []string
+		expect    string
+		expectErr bool
 	}{
 		{ // request to non-leader
-			[]string{cx.epc.EndpointsV3()[(leadIdx+1)%3]},
+			[]string{cx.epc.EndpointsGRPC()[(leadIdx+1)%3]},
 			"no leader endpoint given at ",
+			true,
 		},
 		{ // request to leader
-			[]string{cx.epc.EndpointsV3()[leadIdx]},
+			[]string{cx.epc.EndpointsGRPC()[leadIdx]},
 			fmt.Sprintf("Leadership transferred from %s to %s", types.ID(leaderID), types.ID(transferee)),
+			false,
+		},
+		{ // request to all endpoints
+			cx.epc.EndpointsGRPC(),
+			"Leadership transferred",
+			false,
 		},
 	}
 	for i, tc := range tests {
 		prefix := cx.prefixArgs(tc.eps)
 		cmdArgs := append(prefix, "move-leader", types.ID(transferee).String())
-		if err := e2e.SpawnWithExpectWithEnv(cmdArgs, cx.envMap, tc.expect); err != nil {
-			t.Fatalf("#%d: %v", i, err)
+		err := e2e.SpawnWithExpectWithEnv(cmdArgs, cx.envMap, expect.ExpectedResponse{Value: tc.expect})
+		if tc.expectErr {
+			require.ErrorContains(t, err, tc.expect)
+		} else {
+			require.NoErrorf(t, err, "#%d: %v", i, err)
 		}
 	}
 }
@@ -123,7 +145,7 @@ func setupEtcdctlTest(t *testing.T, cfg *e2e.EtcdProcessClusterConfig, quorum bo
 	if !quorum {
 		cfg = e2e.ConfigStandalone(*cfg)
 	}
-	epc, err := e2e.NewEtcdProcessCluster(t, cfg)
+	epc, err := e2e.NewEtcdProcessCluster(t.Context(), t, e2e.WithConfig(cfg))
 	if err != nil {
 		t.Fatalf("could not start etcd process cluster (%v)", err)
 	}

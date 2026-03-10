@@ -17,6 +17,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -25,16 +26,18 @@ import (
 	"testing"
 	"time"
 
-	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	"go.etcd.io/etcd/client/pkg/v3/transport"
-	"go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/tests/v3/framework/integration"
-
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/tests/v3/framework/config"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 // TestV3PutOverwrite puts a key with the v3 api to a random Cluster member,
@@ -48,33 +51,23 @@ func TestV3PutOverwrite(t *testing.T) {
 	key := []byte("foo")
 	reqput := &pb.PutRequest{Key: key, Value: []byte("bar"), PrevKv: true}
 
-	respput, err := kvc.Put(context.TODO(), reqput)
-	if err != nil {
-		t.Fatalf("couldn't put key (%v)", err)
-	}
+	respput, err := kvc.Put(t.Context(), reqput)
+	require.NoErrorf(t, err, "couldn't put key")
 
 	// overwrite
 	reqput.Value = []byte("baz")
-	respput2, err := kvc.Put(context.TODO(), reqput)
-	if err != nil {
-		t.Fatalf("couldn't put key (%v)", err)
-	}
-	if respput2.Header.Revision <= respput.Header.Revision {
-		t.Fatalf("expected newer revision on overwrite, got %v <= %v",
-			respput2.Header.Revision, respput.Header.Revision)
-	}
+	respput2, err := kvc.Put(t.Context(), reqput)
+	require.NoErrorf(t, err, "couldn't put key")
+	require.Greaterf(t, respput2.Header.Revision, respput.Header.Revision, "expected newer revision on overwrite, got %v <= %v",
+		respput2.Header.Revision, respput.Header.Revision)
 	if pkv := respput2.PrevKv; pkv == nil || string(pkv.Value) != "bar" {
 		t.Fatalf("expected PrevKv=bar, got response %+v", respput2)
 	}
 
 	reqrange := &pb.RangeRequest{Key: key}
-	resprange, err := kvc.Range(context.TODO(), reqrange)
-	if err != nil {
-		t.Fatalf("couldn't get key (%v)", err)
-	}
-	if len(resprange.Kvs) != 1 {
-		t.Fatalf("expected 1 key, got %v", len(resprange.Kvs))
-	}
+	resprange, err := kvc.Range(t.Context(), reqrange)
+	require.NoErrorf(t, err, "couldn't get key")
+	require.Lenf(t, resprange.Kvs, 1, "expected 1 key, got %v", len(resprange.Kvs))
 
 	kv := resprange.Kvs[0]
 	if kv.ModRevision <= kv.CreateRevision {
@@ -86,7 +79,7 @@ func TestV3PutOverwrite(t *testing.T) {
 	}
 }
 
-// TestPutRestart checks if a put after an unrelated member restart succeeds
+// TestV3PutRestart checks if a put after an unrelated member restart succeeds
 func TestV3PutRestart(t *testing.T) {
 	integration.BeforeTest(t)
 	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true})
@@ -104,16 +97,14 @@ func TestV3PutRestart(t *testing.T) {
 	clus.Members[stopIdx].Stop(t)
 	clus.Members[stopIdx].Restart(t)
 	c, cerr := integration.NewClientV3(clus.Members[stopIdx])
-	if cerr != nil {
-		t.Fatalf("cannot create client: %v", cerr)
-	}
+	require.NoErrorf(t, cerr, "cannot create client")
 	clus.Members[stopIdx].ServerClient = c
 
-	ctx, cancel := context.WithTimeout(context.TODO(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	reqput := &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")}
 	_, err := kvc.Put(ctx, reqput)
-	if err != nil && err == ctx.Err() {
+	if err != nil && errors.Is(err, ctx.Err()) {
 		t.Fatalf("expected grpc error, got local ctx error (%v)", err)
 	}
 }
@@ -127,29 +118,21 @@ func TestV3CompactCurrentRev(t *testing.T) {
 	kvc := integration.ToGRPC(clus.RandClient()).KV
 	preq := &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")}
 	for i := 0; i < 3; i++ {
-		if _, err := kvc.Put(context.Background(), preq); err != nil {
-			t.Fatalf("couldn't put key (%v)", err)
-		}
+		_, err := kvc.Put(t.Context(), preq)
+		require.NoErrorf(t, err, "couldn't put key")
 	}
 	// get key to add to proxy cache, if any
-	if _, err := kvc.Range(context.TODO(), &pb.RangeRequest{Key: []byte("foo")}); err != nil {
-		t.Fatal(err)
-	}
+	_, err := kvc.Range(t.Context(), &pb.RangeRequest{Key: []byte("foo")})
+	require.NoError(t, err)
 	// compact on current revision
-	_, err := kvc.Compact(context.Background(), &pb.CompactionRequest{Revision: 4})
-	if err != nil {
-		t.Fatalf("couldn't compact kv space (%v)", err)
-	}
+	_, err = kvc.Compact(t.Context(), &pb.CompactionRequest{Revision: 4})
+	require.NoErrorf(t, err, "couldn't compact kv space")
 	// key still exists when linearized?
-	_, err = kvc.Range(context.Background(), &pb.RangeRequest{Key: []byte("foo")})
-	if err != nil {
-		t.Fatalf("couldn't get key after compaction (%v)", err)
-	}
+	_, err = kvc.Range(t.Context(), &pb.RangeRequest{Key: []byte("foo")})
+	require.NoErrorf(t, err, "couldn't get key after compaction")
 	// key still exists when serialized?
-	_, err = kvc.Range(context.Background(), &pb.RangeRequest{Key: []byte("foo"), Serializable: true})
-	if err != nil {
-		t.Fatalf("couldn't get serialized key after compaction (%v)", err)
-	}
+	_, err = kvc.Range(t.Context(), &pb.RangeRequest{Key: []byte("foo"), Serializable: true})
+	require.NoErrorf(t, err, "couldn't get serialized key after compaction")
 }
 
 // TestV3HashKV ensures that multiple calls of HashKV on same node return same hash and compact rev.
@@ -162,16 +145,12 @@ func TestV3HashKV(t *testing.T) {
 	mvc := integration.ToGRPC(clus.RandClient()).Maintenance
 
 	for i := 0; i < 10; i++ {
-		resp, err := kvc.Put(context.Background(), &pb.PutRequest{Key: []byte("foo"), Value: []byte(fmt.Sprintf("bar%d", i))})
-		if err != nil {
-			t.Fatal(err)
-		}
+		resp, err := kvc.Put(t.Context(), &pb.PutRequest{Key: []byte("foo"), Value: []byte(fmt.Sprintf("bar%d", i))})
+		require.NoError(t, err)
 
 		rev := resp.Header.Revision
-		hresp, err := mvc.HashKV(context.Background(), &pb.HashKVRequest{Revision: 0})
-		if err != nil {
-			t.Fatal(err)
-		}
+		hresp, err := mvc.HashKV(t.Context(), &pb.HashKVRequest{Revision: 0})
+		require.NoError(t, err)
 		if rev != hresp.Header.Revision {
 			t.Fatalf("Put rev %v != HashKV rev %v", rev, hresp.Header.Revision)
 		}
@@ -179,10 +158,8 @@ func TestV3HashKV(t *testing.T) {
 		prevHash := hresp.Hash
 		prevCompactRev := hresp.CompactRevision
 		for i := 0; i < 10; i++ {
-			hresp, err := mvc.HashKV(context.Background(), &pb.HashKVRequest{Revision: 0})
-			if err != nil {
-				t.Fatal(err)
-			}
+			hresp, err := mvc.HashKV(t.Context(), &pb.HashKVRequest{Revision: 0})
+			require.NoError(t, err)
 			if rev != hresp.Header.Revision {
 				t.Fatalf("Put rev %v != HashKV rev %v", rev, hresp.Header.Revision)
 			}
@@ -250,9 +227,10 @@ func TestV3TxnTooManyOps(t *testing.T) {
 		newTxn := &pb.TxnRequest{}
 		addSuccessOps(newTxn)
 		txn.Success = append(txn.Success,
-			&pb.RequestOp{Request: &pb.RequestOp_RequestTxn{
-				RequestTxn: newTxn,
-			},
+			&pb.RequestOp{
+				Request: &pb.RequestOp_RequestTxn{
+					RequestTxn: newTxn,
+				},
 			},
 		)
 	}
@@ -270,7 +248,7 @@ func TestV3TxnTooManyOps(t *testing.T) {
 			tt(txn)
 		}
 
-		_, err := kvc.Txn(context.Background(), txn)
+		_, err := kvc.Txn(t.Context(), txn)
 		if !eqErrGRPC(err, rpctypes.ErrGRPCTooManyOps) {
 			t.Errorf("#%d: err = %v, want %v", i, err, rpctypes.ErrGRPCTooManyOps)
 		}
@@ -283,44 +261,53 @@ func TestV3TxnDuplicateKeys(t *testing.T) {
 	defer clus.Terminate(t)
 
 	putreq := &pb.RequestOp{Request: &pb.RequestOp_RequestPut{RequestPut: &pb.PutRequest{Key: []byte("abc"), Value: []byte("def")}}}
-	delKeyReq := &pb.RequestOp{Request: &pb.RequestOp_RequestDeleteRange{
-		RequestDeleteRange: &pb.DeleteRangeRequest{
-			Key: []byte("abc"),
+	delKeyReq := &pb.RequestOp{
+		Request: &pb.RequestOp_RequestDeleteRange{
+			RequestDeleteRange: &pb.DeleteRangeRequest{
+				Key: []byte("abc"),
+			},
 		},
-	},
 	}
-	delInRangeReq := &pb.RequestOp{Request: &pb.RequestOp_RequestDeleteRange{
-		RequestDeleteRange: &pb.DeleteRangeRequest{
-			Key: []byte("a"), RangeEnd: []byte("b"),
+	delInRangeReq := &pb.RequestOp{
+		Request: &pb.RequestOp_RequestDeleteRange{
+			RequestDeleteRange: &pb.DeleteRangeRequest{
+				Key: []byte("a"), RangeEnd: []byte("b"),
+			},
 		},
-	},
 	}
-	delOutOfRangeReq := &pb.RequestOp{Request: &pb.RequestOp_RequestDeleteRange{
-		RequestDeleteRange: &pb.DeleteRangeRequest{
-			Key: []byte("abb"), RangeEnd: []byte("abc"),
+	delOutOfRangeReq := &pb.RequestOp{
+		Request: &pb.RequestOp_RequestDeleteRange{
+			RequestDeleteRange: &pb.DeleteRangeRequest{
+				Key: []byte("abb"), RangeEnd: []byte("abc"),
+			},
 		},
-	},
 	}
-	txnDelReq := &pb.RequestOp{Request: &pb.RequestOp_RequestTxn{
-		RequestTxn: &pb.TxnRequest{Success: []*pb.RequestOp{delInRangeReq}},
-	},
+	txnDelReq := &pb.RequestOp{
+		Request: &pb.RequestOp_RequestTxn{
+			RequestTxn: &pb.TxnRequest{Success: []*pb.RequestOp{delInRangeReq}},
+		},
 	}
-	txnDelReqTwoSide := &pb.RequestOp{Request: &pb.RequestOp_RequestTxn{
-		RequestTxn: &pb.TxnRequest{
-			Success: []*pb.RequestOp{delInRangeReq},
-			Failure: []*pb.RequestOp{delInRangeReq}},
-	},
+	txnDelReqTwoSide := &pb.RequestOp{
+		Request: &pb.RequestOp_RequestTxn{
+			RequestTxn: &pb.TxnRequest{
+				Success: []*pb.RequestOp{delInRangeReq},
+				Failure: []*pb.RequestOp{delInRangeReq},
+			},
+		},
 	}
 
-	txnPutReq := &pb.RequestOp{Request: &pb.RequestOp_RequestTxn{
-		RequestTxn: &pb.TxnRequest{Success: []*pb.RequestOp{putreq}},
-	},
+	txnPutReq := &pb.RequestOp{
+		Request: &pb.RequestOp_RequestTxn{
+			RequestTxn: &pb.TxnRequest{Success: []*pb.RequestOp{putreq}},
+		},
 	}
-	txnPutReqTwoSide := &pb.RequestOp{Request: &pb.RequestOp_RequestTxn{
-		RequestTxn: &pb.TxnRequest{
-			Success: []*pb.RequestOp{putreq},
-			Failure: []*pb.RequestOp{putreq}},
-	},
+	txnPutReqTwoSide := &pb.RequestOp{
+		Request: &pb.RequestOp_RequestTxn{
+			RequestTxn: &pb.TxnRequest{
+				Success: []*pb.RequestOp{putreq},
+				Failure: []*pb.RequestOp{putreq},
+			},
+		},
 	}
 
 	kvc := integration.ToGRPC(clus.RandClient()).KV
@@ -387,14 +374,14 @@ func TestV3TxnDuplicateKeys(t *testing.T) {
 	}
 	for i, tt := range tests {
 		txn := &pb.TxnRequest{Success: tt.txnSuccess}
-		_, err := kvc.Txn(context.Background(), txn)
+		_, err := kvc.Txn(t.Context(), txn)
 		if !eqErrGRPC(err, tt.werr) {
 			t.Errorf("#%d: err = %v, want %v", i, err, tt.werr)
 		}
 	}
 }
 
-// Testv3TxnRevision tests that the transaction header revision is set as expected.
+// TestV3TxnRevision tests that the transaction header revision is set as expected.
 func TestV3TxnRevision(t *testing.T) {
 	integration.BeforeTest(t)
 	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
@@ -402,17 +389,13 @@ func TestV3TxnRevision(t *testing.T) {
 
 	kvc := integration.ToGRPC(clus.RandClient()).KV
 	pr := &pb.PutRequest{Key: []byte("abc"), Value: []byte("def")}
-	presp, err := kvc.Put(context.TODO(), pr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	presp, err := kvc.Put(t.Context(), pr)
+	require.NoError(t, err)
 
 	txnget := &pb.RequestOp{Request: &pb.RequestOp_RequestRange{RequestRange: &pb.RangeRequest{Key: []byte("abc")}}}
 	txn := &pb.TxnRequest{Success: []*pb.RequestOp{txnget}}
-	tresp, err := kvc.Txn(context.TODO(), txn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tresp, err := kvc.Txn(t.Context(), txn)
+	require.NoError(t, err)
 
 	// did not update revision
 	if presp.Header.Revision != tresp.Header.Revision {
@@ -421,10 +404,8 @@ func TestV3TxnRevision(t *testing.T) {
 
 	txndr := &pb.RequestOp{Request: &pb.RequestOp_RequestDeleteRange{RequestDeleteRange: &pb.DeleteRangeRequest{Key: []byte("def")}}}
 	txn = &pb.TxnRequest{Success: []*pb.RequestOp{txndr}}
-	tresp, err = kvc.Txn(context.TODO(), txn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tresp, err = kvc.Txn(t.Context(), txn)
+	require.NoError(t, err)
 
 	// did not update revision
 	if presp.Header.Revision != tresp.Header.Revision {
@@ -433,10 +414,8 @@ func TestV3TxnRevision(t *testing.T) {
 
 	txnput := &pb.RequestOp{Request: &pb.RequestOp_RequestPut{RequestPut: &pb.PutRequest{Key: []byte("abc"), Value: []byte("123")}}}
 	txn = &pb.TxnRequest{Success: []*pb.RequestOp{txnput}}
-	tresp, err = kvc.Txn(context.TODO(), txn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tresp, err = kvc.Txn(t.Context(), txn)
+	require.NoError(t, err)
 
 	// updated revision
 	if tresp.Header.Revision != presp.Header.Revision+1 {
@@ -444,7 +423,7 @@ func TestV3TxnRevision(t *testing.T) {
 	}
 }
 
-// Testv3TxnCmpHeaderRev tests that the txn header revision is set as expected
+// TestV3TxnCmpHeaderRev tests that the txn header revision is set as expected
 // when compared to the Succeeded field in the txn response.
 func TestV3TxnCmpHeaderRev(t *testing.T) {
 	integration.BeforeTest(t)
@@ -460,7 +439,7 @@ func TestV3TxnCmpHeaderRev(t *testing.T) {
 		go func() {
 			defer close(revc)
 			pr := &pb.PutRequest{Key: []byte("k"), Value: []byte("v")}
-			presp, err := kvc.Put(context.TODO(), pr)
+			presp, err := kvc.Put(t.Context(), pr)
 			errCh <- err
 			if err != nil {
 				return
@@ -470,7 +449,8 @@ func TestV3TxnCmpHeaderRev(t *testing.T) {
 
 		// The read-only txn uses the optimized readindex server path.
 		txnget := &pb.RequestOp{Request: &pb.RequestOp_RequestRange{
-			RequestRange: &pb.RangeRequest{Key: []byte("k")}}}
+			RequestRange: &pb.RangeRequest{Key: []byte("k")},
+		}}
 		txn := &pb.TxnRequest{Success: []*pb.RequestOp{txnget}}
 		// i = 0 /\ Succeeded => put followed txn
 		cmp := &pb.Compare{
@@ -481,15 +461,12 @@ func TestV3TxnCmpHeaderRev(t *testing.T) {
 		}
 		txn.Compare = append(txn.Compare, cmp)
 
-		tresp, err := kvc.Txn(context.TODO(), txn)
-		if err != nil {
-			t.Fatal(err)
-		}
+		tresp, err := kvc.Txn(t.Context(), txn)
+		require.NoError(t, err)
 
 		prev := <-revc
-		if err := <-errCh; err != nil {
-			t.Fatal(err)
-		}
+		err = <-errCh
+		require.NoError(t, err)
 		// put followed txn; should eval to false
 		if prev > tresp.Header.Revision && !tresp.Succeeded {
 			t.Errorf("#%d: got else but put rev %d followed txn rev (%+v)", i, prev, tresp)
@@ -509,9 +486,8 @@ func TestV3TxnRangeCompare(t *testing.T) {
 
 	// put keys, named by expected revision
 	for _, k := range []string{"/a/2", "/a/3", "/a/4", "/f/5"} {
-		if _, err := clus.Client(0).Put(context.TODO(), k, "x"); err != nil {
-			t.Fatal(err)
-		}
+		_, err := clus.Client(0).Put(t.Context(), k, "x")
+		require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -602,17 +578,15 @@ func TestV3TxnRangeCompare(t *testing.T) {
 	for i, tt := range tests {
 		txn := &pb.TxnRequest{}
 		txn.Compare = append(txn.Compare, &tt.cmp)
-		tresp, err := kvc.Txn(context.TODO(), txn)
-		if err != nil {
-			t.Fatal(err)
-		}
+		tresp, err := kvc.Txn(t.Context(), txn)
+		require.NoError(t, err)
 		if tt.wSuccess != tresp.Succeeded {
 			t.Errorf("#%d: expected %v, got %v", i, tt.wSuccess, tresp.Succeeded)
 		}
 	}
 }
 
-// TestV3TxnNested tests nested txns follow paths as expected.
+// TestV3TxnNestedPath tests nested txns follow paths as expected.
 func TestV3TxnNestedPath(t *testing.T) {
 	integration.BeforeTest(t)
 	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
@@ -651,10 +625,8 @@ func TestV3TxnNestedPath(t *testing.T) {
 		txn = nextTxn
 	}
 
-	tresp, err := kvc.Txn(context.TODO(), topTxn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tresp, err := kvc.Txn(t.Context(), topTxn)
+	require.NoError(t, err)
 
 	curTxnResp := tresp
 	for i := range txnPath {
@@ -678,13 +650,9 @@ func TestV3PutIgnoreValue(t *testing.T) {
 
 	// create lease
 	lc := integration.ToGRPC(clus.RandClient()).Lease
-	lresp, err := lc.LeaseGrant(context.TODO(), &pb.LeaseGrantRequest{TTL: 30})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lresp.Error != "" {
-		t.Fatal(lresp.Error)
-	}
+	lresp, err := lc.LeaseGrant(t.Context(), &pb.LeaseGrantRequest{TTL: 30})
+	require.NoError(t, err)
+	require.Empty(t, lresp.Error)
 
 	tests := []struct {
 		putFunc  func() error
@@ -695,7 +663,7 @@ func TestV3PutIgnoreValue(t *testing.T) {
 			func() error {
 				preq := putReq
 				preq.IgnoreValue = true
-				_, err := kvc.Put(context.TODO(), &preq)
+				_, err := kvc.Put(t.Context(), &preq)
 				return err
 			},
 			rpctypes.ErrGRPCKeyNotFound,
@@ -708,8 +676,9 @@ func TestV3PutIgnoreValue(t *testing.T) {
 				preq.IgnoreValue = true
 				txn := &pb.TxnRequest{}
 				txn.Success = append(txn.Success, &pb.RequestOp{
-					Request: &pb.RequestOp_RequestPut{RequestPut: &preq}})
-				_, err := kvc.Txn(context.TODO(), txn)
+					Request: &pb.RequestOp_RequestPut{RequestPut: &preq},
+				})
+				_, err := kvc.Txn(t.Context(), txn)
 				return err
 			},
 			rpctypes.ErrGRPCKeyNotFound,
@@ -717,7 +686,7 @@ func TestV3PutIgnoreValue(t *testing.T) {
 		},
 		{ // put success
 			func() error {
-				_, err := kvc.Put(context.TODO(), &putReq)
+				_, err := kvc.Put(t.Context(), &putReq)
 				return err
 			},
 			nil,
@@ -731,8 +700,9 @@ func TestV3PutIgnoreValue(t *testing.T) {
 				preq.IgnoreValue = true
 				txn := &pb.TxnRequest{}
 				txn.Success = append(txn.Success, &pb.RequestOp{
-					Request: &pb.RequestOp_RequestPut{RequestPut: &preq}})
-				_, err := kvc.Txn(context.TODO(), txn)
+					Request: &pb.RequestOp_RequestPut{RequestPut: &preq},
+				})
+				_, err := kvc.Txn(t.Context(), txn)
 				return err
 			},
 			nil,
@@ -742,7 +712,7 @@ func TestV3PutIgnoreValue(t *testing.T) {
 			func() error {
 				preq := putReq
 				preq.IgnoreValue = true
-				_, err := kvc.Put(context.TODO(), &preq)
+				_, err := kvc.Put(t.Context(), &preq)
 				return err
 			},
 			rpctypes.ErrGRPCValueProvided,
@@ -753,7 +723,7 @@ func TestV3PutIgnoreValue(t *testing.T) {
 				preq := putReq
 				preq.Value = nil
 				preq.IgnoreValue = true
-				presp, err := kvc.Put(context.TODO(), &preq)
+				presp, err := kvc.Put(t.Context(), &preq)
 				if err != nil {
 					return err
 				}
@@ -767,7 +737,7 @@ func TestV3PutIgnoreValue(t *testing.T) {
 		},
 		{ // revoke lease, ensure detached key doesn't get deleted
 			func() error {
-				_, err := lc.LeaseRevoke(context.TODO(), &pb.LeaseRevokeRequest{ID: lresp.ID})
+				_, err := lc.LeaseRevoke(t.Context(), &pb.LeaseRevokeRequest{ID: lresp.ID})
 				return err
 			},
 			nil,
@@ -782,7 +752,7 @@ func TestV3PutIgnoreValue(t *testing.T) {
 		if tt.putErr != nil {
 			continue
 		}
-		rr, err := kvc.Range(context.TODO(), &pb.RangeRequest{Key: key})
+		rr, err := kvc.Range(t.Context(), &pb.RangeRequest{Key: key})
 		if err != nil {
 			t.Fatalf("#%d: %v", i, err)
 		}
@@ -809,13 +779,9 @@ func TestV3PutIgnoreLease(t *testing.T) {
 
 	// create lease
 	lc := integration.ToGRPC(clus.RandClient()).Lease
-	lresp, err := lc.LeaseGrant(context.TODO(), &pb.LeaseGrantRequest{TTL: 30})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lresp.Error != "" {
-		t.Fatal(lresp.Error)
-	}
+	lresp, err := lc.LeaseGrant(t.Context(), &pb.LeaseGrantRequest{TTL: 30})
+	require.NoError(t, err)
+	require.Empty(t, lresp.Error)
 
 	key, val, val1 := []byte("zoo"), []byte("bar"), []byte("bar1")
 	putReq := pb.PutRequest{Key: key, Value: val}
@@ -830,7 +796,7 @@ func TestV3PutIgnoreLease(t *testing.T) {
 			func() error {
 				preq := putReq
 				preq.IgnoreLease = true
-				_, err := kvc.Put(context.TODO(), &preq)
+				_, err := kvc.Put(t.Context(), &preq)
 				return err
 			},
 			rpctypes.ErrGRPCKeyNotFound,
@@ -843,8 +809,9 @@ func TestV3PutIgnoreLease(t *testing.T) {
 				preq.IgnoreLease = true
 				txn := &pb.TxnRequest{}
 				txn.Success = append(txn.Success, &pb.RequestOp{
-					Request: &pb.RequestOp_RequestPut{RequestPut: &preq}})
-				_, err := kvc.Txn(context.TODO(), txn)
+					Request: &pb.RequestOp_RequestPut{RequestPut: &preq},
+				})
+				_, err := kvc.Txn(t.Context(), txn)
 				return err
 			},
 			rpctypes.ErrGRPCKeyNotFound,
@@ -855,7 +822,7 @@ func TestV3PutIgnoreLease(t *testing.T) {
 			func() error {
 				preq := putReq
 				preq.Lease = lresp.ID
-				_, err := kvc.Put(context.TODO(), &preq)
+				_, err := kvc.Put(t.Context(), &preq)
 				return err
 			},
 			nil,
@@ -869,8 +836,9 @@ func TestV3PutIgnoreLease(t *testing.T) {
 				preq.IgnoreLease = true
 				txn := &pb.TxnRequest{}
 				txn.Success = append(txn.Success, &pb.RequestOp{
-					Request: &pb.RequestOp_RequestPut{RequestPut: &preq}})
-				_, err := kvc.Txn(context.TODO(), txn)
+					Request: &pb.RequestOp_RequestPut{RequestPut: &preq},
+				})
+				_, err := kvc.Txn(t.Context(), txn)
 				return err
 			},
 			nil,
@@ -882,7 +850,7 @@ func TestV3PutIgnoreLease(t *testing.T) {
 				preq := putReq
 				preq.Lease = lresp.ID
 				preq.IgnoreLease = true
-				_, err := kvc.Put(context.TODO(), &preq)
+				_, err := kvc.Put(t.Context(), &preq)
 				return err
 			},
 			rpctypes.ErrGRPCLeaseProvided,
@@ -891,7 +859,7 @@ func TestV3PutIgnoreLease(t *testing.T) {
 		},
 		{ // overwrite with previous value, ensure no prev-kv is returned and lease is detached
 			func() error {
-				presp, err := kvc.Put(context.TODO(), &putReq)
+				presp, err := kvc.Put(t.Context(), &putReq)
 				if err != nil {
 					return err
 				}
@@ -906,7 +874,7 @@ func TestV3PutIgnoreLease(t *testing.T) {
 		},
 		{ // revoke lease, ensure detached key doesn't get deleted
 			func() error {
-				_, err := lc.LeaseRevoke(context.TODO(), &pb.LeaseRevokeRequest{ID: lresp.ID})
+				_, err := lc.LeaseRevoke(t.Context(), &pb.LeaseRevokeRequest{ID: lresp.ID})
 				return err
 			},
 			nil,
@@ -922,7 +890,7 @@ func TestV3PutIgnoreLease(t *testing.T) {
 		if tt.putErr != nil {
 			continue
 		}
-		rr, err := kvc.Range(context.TODO(), &pb.RangeRequest{Key: key})
+		rr, err := kvc.Range(t.Context(), &pb.RangeRequest{Key: key})
 		if err != nil {
 			t.Fatalf("#%d: %v", i, err)
 		}
@@ -950,7 +918,7 @@ func TestV3PutMissingLease(t *testing.T) {
 	tests := []func(){
 		// put case
 		func() {
-			if presp, err := kvc.Put(context.TODO(), preq); err == nil {
+			if presp, err := kvc.Put(t.Context(), preq); err == nil {
 				t.Errorf("succeeded put key. req: %v. resp: %v", preq, presp)
 			}
 		},
@@ -959,8 +927,10 @@ func TestV3PutMissingLease(t *testing.T) {
 			txn := &pb.TxnRequest{}
 			txn.Success = append(txn.Success, &pb.RequestOp{
 				Request: &pb.RequestOp_RequestPut{
-					RequestPut: preq}})
-			if tresp, err := kvc.Txn(context.TODO(), txn); err == nil {
+					RequestPut: preq,
+				},
+			})
+			if tresp, err := kvc.Txn(t.Context(), txn); err == nil {
 				t.Errorf("succeeded txn success. req: %v. resp: %v", txn, tresp)
 			}
 		},
@@ -969,14 +939,16 @@ func TestV3PutMissingLease(t *testing.T) {
 			txn := &pb.TxnRequest{}
 			txn.Failure = append(txn.Failure, &pb.RequestOp{
 				Request: &pb.RequestOp_RequestPut{
-					RequestPut: preq}})
+					RequestPut: preq,
+				},
+			})
 			cmp := &pb.Compare{
 				Result: pb.Compare_GREATER,
 				Target: pb.Compare_CREATE,
 				Key:    []byte("bar"),
 			}
 			txn.Compare = append(txn.Compare, cmp)
-			if tresp, err := kvc.Txn(context.TODO(), txn); err == nil {
+			if tresp, err := kvc.Txn(t.Context(), txn); err == nil {
 				t.Errorf("succeeded txn failure. req: %v. resp: %v", txn, tresp)
 			}
 		},
@@ -986,11 +958,15 @@ func TestV3PutMissingLease(t *testing.T) {
 			rreq := &pb.RangeRequest{Key: []byte("bar")}
 			txn.Success = append(txn.Success, &pb.RequestOp{
 				Request: &pb.RequestOp_RequestRange{
-					RequestRange: rreq}})
+					RequestRange: rreq,
+				},
+			})
 			txn.Failure = append(txn.Failure, &pb.RequestOp{
 				Request: &pb.RequestOp_RequestPut{
-					RequestPut: preq}})
-			if tresp, err := kvc.Txn(context.TODO(), txn); err != nil {
+					RequestPut: preq,
+				},
+			})
+			if tresp, err := kvc.Txn(t.Context(), txn); err != nil {
 				t.Errorf("failed good txn. req: %v. resp: %v", txn, tresp)
 			}
 		},
@@ -1000,7 +976,7 @@ func TestV3PutMissingLease(t *testing.T) {
 		f()
 		// key shouldn't have been stored
 		rreq := &pb.RangeRequest{Key: key}
-		rresp, err := kvc.Range(context.TODO(), rreq)
+		rresp, err := kvc.Range(t.Context(), rreq)
 		if err != nil {
 			t.Errorf("#%d. could not rangereq (%v)", i, err)
 		} else if len(rresp.Kvs) != 0 {
@@ -1027,43 +1003,50 @@ func TestV3DeleteRange(t *testing.T) {
 			"delete middle",
 			[]string{"foo", "foo/abc", "fop"},
 			"foo/", "fop", false,
-			[][]byte{[]byte("foo"), []byte("fop")}, 1,
+			[][]byte{[]byte("foo"), []byte("fop")},
+			1,
 		},
 		{
 			"no delete",
 			[]string{"foo", "foo/abc", "fop"},
 			"foo/", "foo/", false,
-			[][]byte{[]byte("foo"), []byte("foo/abc"), []byte("fop")}, 0,
+			[][]byte{[]byte("foo"), []byte("foo/abc"), []byte("fop")},
+			0,
 		},
 		{
 			"delete first",
 			[]string{"foo", "foo/abc", "fop"},
 			"fo", "fop", false,
-			[][]byte{[]byte("fop")}, 2,
+			[][]byte{[]byte("fop")},
+			2,
 		},
 		{
 			"delete tail",
 			[]string{"foo", "foo/abc", "fop"},
 			"foo/", "fos", false,
-			[][]byte{[]byte("foo")}, 2,
+			[][]byte{[]byte("foo")},
+			2,
 		},
 		{
 			"delete exact",
 			[]string{"foo", "foo/abc", "fop"},
 			"foo/abc", "", false,
-			[][]byte{[]byte("foo"), []byte("fop")}, 1,
+			[][]byte{[]byte("foo"), []byte("fop")},
+			1,
 		},
 		{
 			"delete none [x,x)",
 			[]string{"foo"},
 			"foo", "foo", false,
-			[][]byte{[]byte("foo")}, 0,
+			[][]byte{[]byte("foo")},
+			0,
 		},
 		{
 			"delete middle with preserveKVs set",
 			[]string{"foo", "foo/abc", "fop"},
 			"foo/", "fop", true,
-			[][]byte{[]byte("foo"), []byte("fop")}, 1,
+			[][]byte{[]byte("foo"), []byte("fop")},
+			1,
 		},
 	}
 
@@ -1076,7 +1059,7 @@ func TestV3DeleteRange(t *testing.T) {
 			ks := tt.keySet
 			for j := range ks {
 				reqput := &pb.PutRequest{Key: []byte(ks[j]), Value: []byte{}}
-				_, err := kvc.Put(context.TODO(), reqput)
+				_, err := kvc.Put(t.Context(), reqput)
 				if err != nil {
 					t.Fatalf("couldn't put key (%v)", err)
 				}
@@ -1087,7 +1070,7 @@ func TestV3DeleteRange(t *testing.T) {
 				RangeEnd: []byte(tt.end),
 				PrevKv:   tt.prevKV,
 			}
-			dresp, err := kvc.DeleteRange(context.TODO(), dreq)
+			dresp, err := kvc.DeleteRange(t.Context(), dreq)
 			if err != nil {
 				t.Fatalf("couldn't delete range on test %d (%v)", i, err)
 			}
@@ -1101,7 +1084,7 @@ func TestV3DeleteRange(t *testing.T) {
 			}
 
 			rreq := &pb.RangeRequest{Key: []byte{0x0}, RangeEnd: []byte{0xff}}
-			rresp, err := kvc.Range(context.TODO(), rreq)
+			rresp, err := kvc.Range(t.Context(), rreq)
 			if err != nil {
 				t.Errorf("couldn't get range on test %v (%v)", i, err)
 			}
@@ -1110,7 +1093,7 @@ func TestV3DeleteRange(t *testing.T) {
 					dresp.Header.Revision, rresp.Header.Revision)
 			}
 
-			keys := [][]byte{}
+			var keys [][]byte
 			for j := range rresp.Kvs {
 				keys = append(keys, rresp.Kvs[j].Key)
 			}
@@ -1131,13 +1114,13 @@ func TestV3TxnInvalidRange(t *testing.T) {
 	preq := &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")}
 
 	for i := 0; i < 3; i++ {
-		_, err := kvc.Put(context.Background(), preq)
+		_, err := kvc.Put(t.Context(), preq)
 		if err != nil {
 			t.Fatalf("couldn't put key (%v)", err)
 		}
 	}
 
-	_, err := kvc.Compact(context.Background(), &pb.CompactionRequest{Revision: 2})
+	_, err := kvc.Compact(t.Context(), &pb.CompactionRequest{Revision: 2})
 	if err != nil {
 		t.Fatalf("couldn't compact kv space (%v)", err)
 	}
@@ -1146,21 +1129,25 @@ func TestV3TxnInvalidRange(t *testing.T) {
 	txn := &pb.TxnRequest{}
 	txn.Success = append(txn.Success, &pb.RequestOp{
 		Request: &pb.RequestOp_RequestPut{
-			RequestPut: preq}})
+			RequestPut: preq,
+		},
+	})
 
 	rreq := &pb.RangeRequest{Key: []byte("foo"), Revision: 100}
 	txn.Success = append(txn.Success, &pb.RequestOp{
 		Request: &pb.RequestOp_RequestRange{
-			RequestRange: rreq}})
+			RequestRange: rreq,
+		},
+	})
 
-	if _, err := kvc.Txn(context.TODO(), txn); !eqErrGRPC(err, rpctypes.ErrGRPCFutureRev) {
+	if _, err := kvc.Txn(t.Context(), txn); !eqErrGRPC(err, rpctypes.ErrGRPCFutureRev) {
 		t.Errorf("err = %v, want %v", err, rpctypes.ErrGRPCFutureRev)
 	}
 
 	// compacted rev
 	tv, _ := txn.Success[1].Request.(*pb.RequestOp_RequestRange)
 	tv.RequestRange.Revision = 1
-	if _, err := kvc.Txn(context.TODO(), txn); !eqErrGRPC(err, rpctypes.ErrGRPCCompacted) {
+	if _, err := kvc.Txn(t.Context(), txn); !eqErrGRPC(err, rpctypes.ErrGRPCCompacted) {
 		t.Errorf("err = %v, want %v", err, rpctypes.ErrGRPCCompacted)
 	}
 }
@@ -1177,7 +1164,7 @@ func TestV3TooLargeRequest(t *testing.T) {
 	largeV := make([]byte, 2*1024*1024)
 	preq := &pb.PutRequest{Key: []byte("foo"), Value: largeV}
 
-	_, err := kvc.Put(context.Background(), preq)
+	_, err := kvc.Put(t.Context(), preq)
 	if !eqErrGRPC(err, rpctypes.ErrGRPCRequestTooLarge) {
 		t.Errorf("err = %v, want %v", err, rpctypes.ErrGRPCRequestTooLarge)
 	}
@@ -1196,13 +1183,13 @@ func TestV3Hash(t *testing.T) {
 	preq := &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")}
 
 	for i := 0; i < 3; i++ {
-		_, err := kvc.Put(context.Background(), preq)
+		_, err := kvc.Put(t.Context(), preq)
 		if err != nil {
 			t.Fatalf("couldn't put key (%v)", err)
 		}
 	}
 
-	resp, err := m.Hash(context.Background(), &pb.HashRequest{})
+	resp, err := m.Hash(t.Context(), &pb.HashRequest{})
 	if err != nil || resp.Hash == 0 {
 		t.Fatalf("couldn't hash (%v, hash %d)", err, resp.Hash)
 	}
@@ -1215,7 +1202,7 @@ func TestV3HashRestart(t *testing.T) {
 	defer clus.Terminate(t)
 
 	cli := clus.RandClient()
-	resp, err := integration.ToGRPC(cli).Maintenance.Hash(context.Background(), &pb.HashRequest{})
+	resp, err := integration.ToGRPC(cli).Maintenance.Hash(t.Context(), &pb.HashRequest{})
 	if err != nil || resp.Hash == 0 {
 		t.Fatalf("couldn't hash (%v, hash %d)", err, resp.Hash)
 	}
@@ -1228,7 +1215,7 @@ func TestV3HashRestart(t *testing.T) {
 	waitForRestart(t, kvc)
 
 	cli = clus.RandClient()
-	resp, err = integration.ToGRPC(cli).Maintenance.Hash(context.Background(), &pb.HashRequest{})
+	resp, err = integration.ToGRPC(cli).Maintenance.Hash(t.Context(), &pb.HashRequest{})
 	if err != nil || resp.Hash == 0 {
 		t.Fatalf("couldn't hash (%v, hash %d)", err, resp.Hash)
 	}
@@ -1259,13 +1246,12 @@ func TestV3StorageQuotaAPI(t *testing.T) {
 
 	// test small put that fits in quota
 	smallbuf := make([]byte, 512)
-	if _, err := kvc.Put(context.TODO(), &pb.PutRequest{Key: key, Value: smallbuf}); err != nil {
-		t.Fatal(err)
-	}
+	_, err := kvc.Put(t.Context(), &pb.PutRequest{Key: key, Value: smallbuf})
+	require.NoError(t, err)
 
 	// test big put
 	bigbuf := make([]byte, quotasize)
-	_, err := kvc.Put(context.TODO(), &pb.PutRequest{Key: key, Value: bigbuf})
+	_, err = kvc.Put(t.Context(), &pb.PutRequest{Key: key, Value: bigbuf})
 	if !eqErrGRPC(err, rpctypes.ErrGRPCNoSpace) {
 		t.Fatalf("big put got %v, expected %v", err, rpctypes.ErrGRPCNoSpace)
 	}
@@ -1281,7 +1267,7 @@ func TestV3StorageQuotaAPI(t *testing.T) {
 	}
 	txnreq := &pb.TxnRequest{}
 	txnreq.Success = append(txnreq.Success, puttxn)
-	_, txnerr := kvc.Txn(context.TODO(), txnreq)
+	_, txnerr := kvc.Txn(t.Context(), txnreq)
 	if !eqErrGRPC(txnerr, rpctypes.ErrGRPCNoSpace) {
 		t.Fatalf("big txn got %v, expected %v", err, rpctypes.ErrGRPCNoSpace)
 	}
@@ -1513,14 +1499,14 @@ func TestV3RangeRequest(t *testing.T) {
 			for _, k := range tt.putKeys {
 				kvc := integration.ToGRPC(clus.RandClient()).KV
 				req := &pb.PutRequest{Key: []byte(k), Value: []byte("bar")}
-				if _, err := kvc.Put(context.TODO(), req); err != nil {
+				if _, err := kvc.Put(t.Context(), req); err != nil {
 					t.Fatalf("#%d: couldn't put key (%v)", i, err)
 				}
 			}
 
 			for j, req := range tt.reqs {
 				kvc := integration.ToGRPC(clus.RandClient()).KV
-				resp, err := kvc.Range(context.TODO(), &req)
+				resp, err := kvc.Range(t.Context(), &req)
 				if err != nil {
 					t.Errorf("#%d.%d: Range error: %v", i, j, err)
 					continue
@@ -1560,7 +1546,7 @@ func TestTLSGRPCRejectInsecureClient(t *testing.T) {
 	// nil out TLS field so client will use an insecure connection
 	clus.Members[0].ClientTLSInfo = nil
 	client, err := integration.NewClientV3(clus.Members[0])
-	if err != nil && err != context.DeadlineExceeded {
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("unexpected error (%v)", err)
 	} else if client == nil {
 		// Ideally, no client would be returned. However, grpc will
@@ -1572,7 +1558,7 @@ func TestTLSGRPCRejectInsecureClient(t *testing.T) {
 
 	donec := make(chan error, 1)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		reqput := &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")}
 		_, perr := integration.ToGRPC(client).KV.Put(ctx, reqput)
 		cancel()
@@ -1592,13 +1578,12 @@ func TestTLSGRPCRejectSecureClient(t *testing.T) {
 	defer clus.Terminate(t)
 
 	clus.Members[0].ClientTLSInfo = &integration.TestTLSInfo
-	clus.Members[0].DialOptions = []grpc.DialOption{grpc.WithBlock()}
-	clus.Members[0].GrpcURL = strings.Replace(clus.Members[0].GrpcURL, "http://", "https://", 1)
+	clus.Members[0].GRPCURL = strings.Replace(clus.Members[0].GRPCURL, "http://", "https://", 1)
 	client, err := integration.NewClientV3(clus.Members[0])
 	if client != nil || err == nil {
 		client.Close()
 		t.Fatalf("expected no client")
-	} else if err != context.DeadlineExceeded {
+	} else if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("unexpected error (%v)", err)
 	}
 }
@@ -1617,7 +1602,7 @@ func TestTLSGRPCAcceptSecureAll(t *testing.T) {
 	defer client.Close()
 
 	reqput := &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")}
-	if _, err := integration.ToGRPC(client).KV.Put(context.TODO(), reqput); err != nil {
+	if _, err := integration.ToGRPC(client).KV.Put(t.Context(), reqput); err != nil {
 		t.Fatalf("unexpected error on put over tls (%v)", err)
 	}
 }
@@ -1635,36 +1620,28 @@ func TestTLSReloadAtomicReplace(t *testing.T) {
 
 	cloneFunc := func() transport.TLSInfo {
 		tlsInfo, terr := copyTLSFiles(integration.TestTLSInfo, certsDir)
-		if terr != nil {
-			t.Fatal(terr)
-		}
-		if _, err := copyTLSFiles(integration.TestTLSInfoExpired, certsDirExp); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, terr)
+		_, err := copyTLSFiles(integration.TestTLSInfoExpired, certsDirExp)
+		require.NoError(t, err)
 		return tlsInfo
 	}
 	replaceFunc := func() {
-		if err := os.Rename(certsDir, tmpDir); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Rename(certsDirExp, certsDir); err != nil {
-			t.Fatal(err)
-		}
+		err := os.Rename(certsDir, tmpDir)
+		require.NoError(t, err)
+		err = os.Rename(certsDirExp, certsDir)
+		require.NoError(t, err)
 		// after rename,
 		// 'certsDir' contains expired certs
 		// 'tmpDir' contains valid certs
 		// 'certsDirExp' does not exist
 	}
 	revertFunc := func() {
-		if err := os.Rename(tmpDir, certsDirExp); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Rename(certsDir, tmpDir); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Rename(certsDirExp, certsDir); err != nil {
-			t.Fatal(err)
-		}
+		err := os.Rename(tmpDir, certsDirExp)
+		require.NoError(t, err)
+		err = os.Rename(certsDir, tmpDir)
+		require.NoError(t, err)
+		err = os.Rename(certsDirExp, certsDir)
+		require.NoError(t, err)
 	}
 	testTLSReload(t, cloneFunc, replaceFunc, revertFunc, false)
 }
@@ -1677,20 +1654,16 @@ func TestTLSReloadCopy(t *testing.T) {
 
 	cloneFunc := func() transport.TLSInfo {
 		tlsInfo, terr := copyTLSFiles(integration.TestTLSInfo, certsDir)
-		if terr != nil {
-			t.Fatal(terr)
-		}
+		require.NoError(t, terr)
 		return tlsInfo
 	}
 	replaceFunc := func() {
-		if _, err := copyTLSFiles(integration.TestTLSInfoExpired, certsDir); err != nil {
-			t.Fatal(err)
-		}
+		_, err := copyTLSFiles(integration.TestTLSInfoExpired, certsDir)
+		require.NoError(t, err)
 	}
 	revertFunc := func() {
-		if _, err := copyTLSFiles(integration.TestTLSInfo, certsDir); err != nil {
-			t.Fatal(err)
-		}
+		_, err := copyTLSFiles(integration.TestTLSInfo, certsDir)
+		require.NoError(t, err)
 	}
 	testTLSReload(t, cloneFunc, replaceFunc, revertFunc, false)
 }
@@ -1703,20 +1676,16 @@ func TestTLSReloadCopyIPOnly(t *testing.T) {
 
 	cloneFunc := func() transport.TLSInfo {
 		tlsInfo, terr := copyTLSFiles(integration.TestTLSInfoIP, certsDir)
-		if terr != nil {
-			t.Fatal(terr)
-		}
+		require.NoError(t, terr)
 		return tlsInfo
 	}
 	replaceFunc := func() {
-		if _, err := copyTLSFiles(integration.TestTLSInfoExpiredIP, certsDir); err != nil {
-			t.Fatal(err)
-		}
+		_, err := copyTLSFiles(integration.TestTLSInfoExpiredIP, certsDir)
+		require.NoError(t, err)
 	}
 	revertFunc := func() {
-		if _, err := copyTLSFiles(integration.TestTLSInfoIP, certsDir); err != nil {
-			t.Fatal(err)
-		}
+		_, err := copyTLSFiles(integration.TestTLSInfoIP, certsDir)
+		require.NoError(t, err)
 	}
 	testTLSReload(t, cloneFunc, replaceFunc, revertFunc, true)
 }
@@ -1726,7 +1695,8 @@ func testTLSReload(
 	cloneFunc func() transport.TLSInfo,
 	replaceFunc func(),
 	revertFunc func(),
-	useIP bool) {
+	useIP bool,
+) {
 	integration.BeforeTest(t)
 
 	// 1. separate copies for TLS assets modification
@@ -1756,8 +1726,7 @@ func testTLSReload(
 				continue
 			}
 			cli, cerr := integration.NewClient(t, clientv3.Config{
-				DialOptions: []grpc.DialOption{grpc.WithBlock()},
-				Endpoints:   []string{clus.Members[0].GRPCURL()},
+				Endpoints:   []string{clus.Members[0].GRPCURL},
 				DialTimeout: time.Second,
 				TLS:         cc,
 			})
@@ -1775,7 +1744,7 @@ func testTLSReload(
 	// 5. expect dial time-out when loading expired certs
 	select {
 	case gerr := <-errc:
-		if gerr != context.DeadlineExceeded {
+		if !errors.Is(gerr, context.DeadlineExceeded) {
 			t.Fatalf("expected %v, got %v", context.DeadlineExceeded, gerr)
 		}
 	case <-time.After(5 * time.Second):
@@ -1787,11 +1756,9 @@ func testTLSReload(
 
 	// 7. new requests should trigger listener to reload valid certs
 	tls, terr := tlsInfo.ClientConfig()
-	if terr != nil {
-		t.Fatal(terr)
-	}
+	require.NoError(t, terr)
 	cl, cerr := integration.NewClient(t, clientv3.Config{
-		Endpoints:   []string{clus.Members[0].GRPCURL()},
+		Endpoints:   []string{clus.Members[0].GRPCURL},
 		DialTimeout: 5 * time.Second,
 		TLS:         tls,
 	})
@@ -1817,10 +1784,10 @@ func TestGRPCRequireLeader(t *testing.T) {
 	defer client.Close()
 
 	// wait for election timeout, then member[0] will not have a leader.
-	time.Sleep(time.Duration(3*integration.ElectionTicks) * integration.TickDuration)
+	time.Sleep(time.Duration(3*integration.ElectionTicks) * config.TickDuration)
 
 	md := metadata.Pairs(rpctypes.MetadataRequireLeaderKey, rpctypes.MetadataHasLeader)
-	ctx := metadata.NewOutgoingContext(context.Background(), md)
+	ctx := metadata.NewOutgoingContext(t.Context(), md)
 	reqput := &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")}
 	if _, err := integration.ToGRPC(client).KV.Put(ctx, reqput); rpctypes.ErrorDesc(err) != rpctypes.ErrNoLeader.Error() {
 		t.Errorf("err = %v, want %v", err, rpctypes.ErrNoLeader)
@@ -1841,7 +1808,7 @@ func TestGRPCStreamRequireLeader(t *testing.T) {
 
 	wAPI := integration.ToGRPC(client).Watch
 	md := metadata.Pairs(rpctypes.MetadataRequireLeaderKey, rpctypes.MetadataHasLeader)
-	ctx := metadata.NewOutgoingContext(context.Background(), md)
+	ctx := metadata.NewOutgoingContext(t.Context(), md)
 	wStream, err := wAPI.Watch(ctx)
 	if err != nil {
 		t.Fatalf("wAPI.Watch error: %v", err)
@@ -1870,7 +1837,7 @@ func TestGRPCStreamRequireLeader(t *testing.T) {
 	clus.Members[2].Restart(t)
 
 	clus.WaitMembersForLeader(t, clus.Members)
-	time.Sleep(time.Duration(2*integration.ElectionTicks) * integration.TickDuration)
+	time.Sleep(time.Duration(2*integration.ElectionTicks) * config.TickDuration)
 
 	// new stream should also be OK now after we restarted the other members
 	wStream, err = wAPI.Watch(ctx)
@@ -1908,7 +1875,7 @@ func TestV3LargeRequests(t *testing.T) {
 			defer clus.Terminate(t)
 			kvcli := integration.ToGRPC(clus.Client(0)).KV
 			reqput := &pb.PutRequest{Key: []byte("foo"), Value: make([]byte, test.valueSize)}
-			_, err := kvcli.Put(context.TODO(), reqput)
+			_, err := kvcli.Put(t.Context(), reqput)
 			if !eqErrGRPC(err, test.expectError) {
 				t.Errorf("#%d: expected error %v, got %v", i, test.expectError, err)
 			}
@@ -1917,12 +1884,77 @@ func TestV3LargeRequests(t *testing.T) {
 			if test.expectError == nil {
 				reqget := &pb.RangeRequest{Key: []byte("foo")}
 				// limit receive call size with original value + gRPC overhead bytes
-				_, err = kvcli.Range(context.TODO(), reqget, grpc.MaxCallRecvMsgSize(test.valueSize+512*1024))
+				_, err = kvcli.Range(t.Context(), reqget, grpc.MaxCallRecvMsgSize(test.valueSize+512*1024))
 				if err != nil {
 					t.Errorf("#%d: range expected no error, got %v", i, err)
 				}
 			}
+		})
+	}
+}
 
+// TestV3AdditionalGRPCOptions ensures that configurable GRPCAdditionalServerOptions works as intended.
+func TestV3AdditionalGRPCOptions(t *testing.T) {
+	integration.BeforeTest(t)
+	tests := []struct {
+		name            string
+		maxRequestBytes uint
+		grpcOpts        []grpc.ServerOption
+		valueSize       int
+		expectError     error
+	}{
+		{
+			name:            "requests will get a gRPC error because it's larger than gRPC MaxRecvMsgSize",
+			maxRequestBytes: 8 * 1024 * 1024,
+			grpcOpts:        nil,
+			valueSize:       9 * 1024 * 1024,
+			expectError:     status.Errorf(codes.ResourceExhausted, "grpc: received message larger than max"),
+		},
+		{
+			name:            "requests will get an etcd custom gRPC error because it's larger than MaxRequestBytes",
+			maxRequestBytes: 8 * 1024 * 1024,
+			grpcOpts:        []grpc.ServerOption{grpc.MaxRecvMsgSize(10 * 1024 * 1024)},
+			valueSize:       9 * 1024 * 1024,
+			expectError:     rpctypes.ErrGRPCRequestTooLarge,
+		},
+		{
+			name:            "requests size is smaller than MaxRequestBytes but larger than MaxRecvMsgSize",
+			maxRequestBytes: 8 * 1024 * 1024,
+			grpcOpts:        []grpc.ServerOption{grpc.MaxRecvMsgSize(4 * 1024 * 1024)},
+			valueSize:       6 * 1024 * 1024,
+			expectError:     status.Errorf(codes.ResourceExhausted, "grpc: received message larger than max"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clus := integration.NewCluster(t, &integration.ClusterConfig{
+				Size:                        1,
+				MaxRequestBytes:             test.maxRequestBytes,
+				ClientMaxCallSendMsgSize:    12 * 1024 * 1024,
+				GRPCAdditionalServerOptions: test.grpcOpts,
+			})
+			defer clus.Terminate(t)
+			kvcli := integration.ToGRPC(clus.Client(0)).KV
+			reqput := &pb.PutRequest{Key: []byte("foo"), Value: make([]byte, test.valueSize)}
+			if _, err := kvcli.Put(t.Context(), reqput); err != nil {
+				var etcdErr rpctypes.EtcdError
+				if errors.As(err, &etcdErr) {
+					if err.Error() != status.Convert(test.expectError).Message() {
+						t.Errorf("expected %v, got %v", status.Convert(test.expectError).Message(), err.Error())
+					}
+				} else if !strings.HasPrefix(err.Error(), test.expectError.Error()) {
+					t.Errorf("expected error starting with '%s', got '%s'", test.expectError.Error(), err.Error())
+				}
+			}
+			// request went through, expect large response back from server
+			if test.expectError == nil {
+				reqget := &pb.RangeRequest{Key: []byte("foo")}
+				// limit receive call size with original value + gRPC overhead bytes
+				_, err := kvcli.Range(t.Context(), reqget, grpc.MaxCallRecvMsgSize(test.valueSize+512*1024))
+				if err != nil {
+					t.Errorf("range expected no error, got %v", err)
+				}
+			}
 		})
 	}
 }
@@ -1940,7 +1972,7 @@ func waitForRestart(t *testing.T, kvc pb.KVClient) {
 	// TODO: Remove retry loop once the new grpc load balancer provides retry.
 	var err error
 	for i := 0; i < 10; i++ {
-		if _, err = kvc.Range(context.TODO(), req, grpc.WaitForReady(true)); err != nil {
+		if _, err = kvc.Range(t.Context(), req, grpc.WaitForReady(true)); err != nil {
 			if status, ok := status.FromError(err); ok && status.Code() == codes.Unavailable {
 				time.Sleep(time.Millisecond * 250)
 			} else {

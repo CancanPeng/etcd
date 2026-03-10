@@ -23,24 +23,27 @@ import (
 	"net/http"
 	"strings"
 
-	"go.etcd.io/etcd/client/v3"
-
-	grpcprom "github.com/grpc-ecosystem/go-grpc-prometheus"
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-func mockClient_metrics() {
+func mockClientMetrics() {
 	fmt.Println(`grpc_client_started_total{grpc_method="Range",grpc_service="etcdserverpb.KV",grpc_type="unary"} 1`)
 }
 
 func ExampleClient_metrics() {
-	forUnitTestsRunInMockedContext(mockClient_metrics, func() {
+	forUnitTestsRunInMockedContext(mockClientMetrics, func() {
+		clientMetrics := grpcprom.NewClientMetrics()
+		prometheus.Register(clientMetrics)
 		cli, err := clientv3.New(clientv3.Config{
 			Endpoints: exampleEndpoints(),
 			DialOptions: []grpc.DialOption{
-				grpc.WithUnaryInterceptor(grpcprom.UnaryClientInterceptor),
-				grpc.WithStreamInterceptor(grpcprom.StreamClientInterceptor),
+				grpc.WithUnaryInterceptor(clientMetrics.UnaryClientInterceptor()),
+				grpc.WithStreamInterceptor(clientMetrics.StreamClientInterceptor()),
 			},
 		})
 		if err != nil {

@@ -1,165 +1,241 @@
-# run from repository root
+REPOSITORY_ROOT := $(shell git rev-parse --show-toplevel)
 
-
-
-# Example:
-#   make build
-#   make clean
-#   make docker-clean
-#   make docker-start
-#   make docker-kill
-#   make docker-remove
-
-UNAME := $(shell uname)
-XARGS = xargs
-ARCH ?= $(shell go env GOARCH)
-
-# -r is only necessary on GNU xargs.
-ifeq ($(UNAME), Linux)
-XARGS += -r
-endif
-XARGS += rm -r
+.PHONY: all
+all: build
+include $(REPOSITORY_ROOT)/tests/robustness/Makefile
 
 .PHONY: build
 build:
-	GO_BUILD_FLAGS="-v" ./scripts/build.sh
-	./bin/etcd --version
-	./bin/etcdctl version
-	./bin/etcdutl version
+	GO_BUILD_FLAGS="${GO_BUILD_FLAGS} -v -mod=readonly" ./scripts/build.sh
 
+.PHONY: install-benchmark
+install-benchmark: build
+ifeq (, $(shell command -v benchmark))
+	@echo "Installing etcd benchmark tool..."
+	go install -v ./tools/benchmark
+else
+	@echo "benchmark tool already installed..."
+endif
+
+.PHONY: bench-put
+bench-put: build install-benchmark
+	@echo "Running benchmark: put $(ARGS)"
+	./scripts/benchmark_test.sh put $(ARGS)
+
+PLATFORMS=linux-amd64 linux-386 linux-arm linux-arm64 linux-ppc64le linux-s390x darwin-amd64 darwin-arm64 windows-amd64 windows-arm64
+
+.PHONY: build-all
+build-all:
+	@for platform in $(PLATFORMS); do \
+		$(MAKE) build-$${platform}; \
+	done
+
+.PHONY: build-%
+build-%:
+	GOOS=$$(echo $* | cut -d- -f 1) GOARCH=$$(echo $* | cut -d- -f 2) GO_BUILD_FLAGS="${GO_BUILD_FLAGS} -v -mod=readonly" ./scripts/build.sh
+
+.PHONY: tools
+tools:
+	GO_BUILD_FLAGS="${GO_BUILD_FLAGS} -v -mod=readonly" ./scripts/build_tools.sh
+
+# Tests
+
+GO_TEST_FLAGS?=
+
+.PHONY: test
+test:
+	PASSES="unit integration release e2e" ./scripts/test.sh $(GO_TEST_FLAGS)
+
+.PHONY: test-unit
+test-unit:
+	PASSES="unit" ./scripts/test.sh $(GO_TEST_FLAGS)
+
+.PHONY: test-integration
+test-integration:
+	PASSES="integration" ./scripts/test.sh $(GO_TEST_FLAGS)
+
+.PHONY: test-e2e
+test-e2e: build
+	PASSES="e2e" ./scripts/test.sh $(GO_TEST_FLAGS)
+
+.PHONY: test-grpcproxy-integration
+test-grpcproxy-integration:
+	PASSES="grpcproxy_integration" ./scripts/test.sh $(GO_TEST_FLAGS)
+
+.PHONY: test-grpcproxy-e2e
+test-grpcproxy-e2e: build
+	PASSES="grpcproxy_e2e" ./scripts/test.sh $(GO_TEST_FLAGS)
+
+.PHONY: test-e2e-release
+test-e2e-release: build
+	PASSES="release e2e" ./scripts/test.sh $(GO_TEST_FLAGS)
+
+# When we release the first 3.7.0-alpha.0, we can remove `VERSION="3.7.99"` below.
+.PHONY: test-release
+test-release:
+	PASSES="release_tests" VERSION="3.7.99" ./scripts/test.sh $(GO_TEST_FLAGS)
+
+.PHONY: test-robustness
+test-robustness:
+	PASSES="robustness" ./scripts/test.sh $(GO_TEST_FLAGS)
+
+.PHONY: test-coverage
+test-coverage:
+	COVERDIR=covdir PASSES="build cov" ./scripts/test.sh $(GO_TEST_FLAGS)
+
+.PHONY: upload-coverage-report
+upload-coverage-report:
+	return_code=0; \
+	$(MAKE) test-coverage || return_code=$$?; \
+	COVERDIR=covdir ./scripts/codecov_upload.sh; \
+	exit $$return_code
+
+.PHONY: fuzz
+fuzz: 
+	./scripts/fuzzing.sh
+
+# Static analysis
+.PHONY: verify
+verify: verify-bom verify-lint verify-dep verify-shellcheck verify-mod-tidy \
+	verify-shellws verify-proto-annotations verify-genproto verify-yamllint \
+	verify-markdown-marker verify-go-versions verify-gomodguard \
+	verify-go-workspace verify-grpc-experimental
+
+.PHONY: fix
+fix: fix-mod-tidy fix-bom fix-lint fix-yamllint sync-toolchain-directive \
+	update-go-workspace fix-shell-ws
+
+.PHONY: verify-bom
+verify-bom:
+	PASSES="bom" ./scripts/test.sh
+
+.PHONY: fix-bom
+fix-bom:
+	./scripts/updatebom.sh
+
+.PHONY: verify-dep
+verify-dep:
+	PASSES="dep" ./scripts/test.sh
+
+.PHONY: verify-lint
+verify-lint: install-golangci-lint
+	PASSES="lint" ./scripts/test.sh
+
+.PHONY: fix-lint
+fix-lint: install-golangci-lint
+	PASSES="lint_fix" ./scripts/test.sh
+
+.PHONY: verify-shellcheck
+verify-shellcheck:
+	PASSES="shellcheck" ./scripts/test.sh
+
+.PHONY: verify-mod-tidy
+verify-mod-tidy:
+	PASSES="mod_tidy" ./scripts/test.sh
+
+.PHONY: fix-mod-tidy
+fix-mod-tidy:
+	./scripts/fix/mod-tidy.sh
+
+.PHONY: verify-shellws
+verify-shellws:
+	PASSES="shellws" ./scripts/test.sh
+
+.PHONY: fix-shell-ws
+fix-shell-ws:
+	./scripts/fix/shell_ws.sh
+
+.PHONY: verify-proto-annotations
+verify-proto-annotations:
+	PASSES="proto_annotations" ./scripts/test.sh
+
+.PHONY: verify-genproto
+verify-genproto:
+	PASSES="genproto" ./scripts/test.sh
+
+.PHONY: verify-yamllint
+verify-yamllint:
+ifeq (, $(shell command -v yamllint))
+	@echo "Installing yamllint..."
+	tmpdir=$$(mktemp -d); \
+	trap "rm -rf $$tmpdir" EXIT; \
+	python3 -m venv $$tmpdir; \
+	$$tmpdir/bin/python3 -m pip install yamllint; \
+	$$tmpdir/bin/yamllint --config-file tools/.yamllint .
+else
+	@echo "yamllint already installed..."
+	yamllint --config-file tools/.yamllint .
+endif
+
+.PHONY: verify-markdown-marker
+verify-markdown-marker:
+	PASSES="markdown_marker" ./scripts/test.sh
+
+.PHONY: fix-yamllint
+fix-yamllint:
+	./scripts/fix/yamllint.sh
+
+.PHONY: run-govulncheck
+run-govulncheck:
+	PASSES="govuln" ./scripts/test.sh
+
+# Tools
+
+.PHONY: install-golangci-lint
+install-golangci-lint:
+	./scripts/verify_golangci-lint_version.sh
+
+.PHONY: install-lazyfs
+install-lazyfs: bin/lazyfs
+bin/lazyfs:
+	rm /tmp/lazyfs -rf
+	git clone --depth 1 --branch 0.2.0 https://github.com/dsrhaslab/lazyfs /tmp/lazyfs
+	cd /tmp/lazyfs/libs/libpcache; ./build.sh
+	cd /tmp/lazyfs/lazyfs; ./build.sh
+	mkdir -p ./bin
+	cp /tmp/lazyfs/lazyfs/build/lazyfs ./bin/lazyfs
+
+# Cleanup
+.PHONY: clean
 clean:
 	rm -f ./codecov
 	rm -rf ./covdir
-	rm -f ./bin/Dockerfile-release*
+	rm -f ./bin/Dockerfile-release
 	rm -rf ./bin/etcd*
+	rm -rf ./bin/lazyfs
+	rm -rf ./bin/python
 	rm -rf ./default.etcd
 	rm -rf ./tests/e2e/default.etcd
 	rm -rf ./release
 	rm -rf ./coverage/*.err ./coverage/*.out
 	rm -rf ./tests/e2e/default.proxy
-	find ./ -name "127.0.0.1:*" -o -name "localhost:*" -o -name "*.log" -o -name "agent-*" -o -name "*.coverprofile" -o -name "testname-proxy-*" | $(XARGS)
+	rm -rf ./bin/shellcheck*
+	find ./ -name "127.0.0.1:*" -o -name "localhost:*" -o -name "*.log" -o -name "agent-*" -o -name "*.coverprofile" -o -name "testname-proxy-*" -delete
 
-GO_VERSION ?= 1.17.8
-ETCD_VERSION ?= $(shell git rev-parse --short HEAD || echo "GitNotFound")
+.PHONY: verify-go-versions
+verify-go-versions:
+	./scripts/verify_go_versions.sh
 
-TEST_SUFFIX = $(shell date +%s | base64 | head -c 15)
-TEST_OPTS ?= PASSES='unit'
+.PHONY: verify-gomodguard
+verify-gomodguard:
+	PASSES="gomodguard" ./scripts/test.sh
 
-TMP_DIR_MOUNT_FLAG = --tmpfs=/tmp:exec
-ifdef HOST_TMP_DIR
-	TMP_DIR_MOUNT_FLAG = --mount type=bind,source=$(HOST_TMP_DIR),destination=/tmp
-endif
+.PHONY: verify-go-workspace
+verify-go-workspace:
+	PASSES="go_workspace" ./scripts/test.sh
 
+.PHONY: verify-grpc-experimental
+verify-grpc-experimental:
+	./scripts/verify_grpc_experimental.sh
 
-TMP_DOCKERFILE:=$(shell mktemp)
+.PHONY: sync-toolchain-directive
+sync-toolchain-directive:
+	./scripts/sync_go_toolchain_directive.sh
 
-# Example:
-#   GO_VERSION=1.14.3 make build-docker-test
-#   make build-docker-test
-#
-#   gcloud auth configure-docker
-#   GO_VERSION=1.14.3 make push-docker-test
-#   make push-docker-test
-#
-#   gsutil -m acl ch -u allUsers:R -r gs://artifacts.etcd-development.appspot.com
-#   make pull-docker-test
+.PHONY: markdown-diff-lint
+markdown-diff-lint:
+	./scripts/markdown_diff_lint.sh
 
-build-docker-test:
-	$(info GO_VERSION: $(GO_VERSION))
-	@sed 's|REPLACE_ME_GO_VERSION|$(GO_VERSION)|g' ./tests/Dockerfile > $(TMP_DOCKERFILE)
-	docker build \
-	  --network=host \
-	  --tag gcr.io/etcd-development/etcd-test:go$(GO_VERSION) \
-	  --file $(TMP_DOCKERFILE) .
-
-push-docker-test:
-	$(info GO_VERSION: $(GO_VERSION))
-	docker push gcr.io/etcd-development/etcd-test:go$(GO_VERSION)
-
-pull-docker-test:
-	$(info GO_VERSION: $(GO_VERSION))
-	docker pull gcr.io/etcd-development/etcd-test:go$(GO_VERSION)
-
-# Example:
-#
-# Local machine:
-#   TEST_OPTS="PASSES='fmt'" make test
-#   TEST_OPTS="PASSES='fmt bom dep build unit'" make test
-#   TEST_OPTS="PASSES='build unit release integration_e2e functional'" make test
-#   TEST_OPTS="PASSES='build grpcproxy'" make test
-#
-# grpc-proxy tests:
-#   TEST_OPTS="PASSES='build grpcproxy'" make test
-#   HOST_TMP_DIR=/tmp TEST_OPTS="PASSES='build grpcproxy'" make test
-
-.PHONY: test
-test:
-	$(info TEST_OPTS: $(TEST_OPTS))
-	$(info log-file: test-$(TEST_SUFFIX).log)
-	$(TEST_OPTS) OUTPUT_FILE="test-$(TEST_SUFFIX).log" ./scripts/test.sh
-	! egrep "(--- FAIL:|FAIL:|DATA RACE|panic: test timed out|appears to have leaked)" -B50 -A10 test-$(TEST_SUFFIX).log
-
-test-smoke:
-	$(info log-file: test-$(TEST_SUFFIX).log)
-	PASSES="fmt build unit" OUTPUT_FILE="test-$(TEST_SUFFIX).log" ./scripts/test.sh
-
-test-full:
-	$(info log-file: test-$(TEST_SUFFIX).log)
-	PASSES="fmt build release unit integration functional e2e grpcproxy" OUTPUT_FILE="test-$(TEST_SUFFIX).log" ./scripts/test.sh
-
-ensure-docker-test-image-exists:
-	make pull-docker-test || ( echo "WARNING: Container Image not found in registry, building locally"; make build-docker-test )
-
-docker-test: ensure-docker-test-image-exists
-	$(info GO_VERSION: $(GO_VERSION))
-	$(info ETCD_VERSION: $(ETCD_VERSION))
-	$(info TEST_OPTS: $(TEST_OPTS))
-	$(info log-file: test-$(TEST_SUFFIX).log)
-	$(info HOST_TMP_DIR: $(HOST_TMP_DIR))
-	$(info TMP_DIR_MOUNT_FLAG: $(TMP_DIR_MOUNT_FLAG))
-	docker run \
-	  --rm \
-	  $(TMP_DIR_MOUNT_FLAG) \
-	  --mount type=bind,source=`pwd`,destination=/go/src/go.etcd.io/etcd \
-	  gcr.io/etcd-development/etcd-test:go$(GO_VERSION) \
-	  /bin/bash -c "$(TEST_OPTS) OUTPUT_FILE='test-$(TEST_SUFFIX).log' ./scripts/test.sh"
-	! egrep "(--- FAIL:|FAIL:|DATA RACE|panic: test timed out|appears to have leaked)" -B50 -A10 test-$(TEST_SUFFIX).log
-
-docker-test-coverage:
-	$(info GO_VERSION: $(GO_VERSION))
-	$(info ETCD_VERSION: $(ETCD_VERSION))
-	$(info log-file: docker-test-coverage-$(TEST_SUFFIX).log)
-	$(info HOST_TMP_DIR: $(HOST_TMP_DIR))
-	$(info TMP_DIR_MOUNT_FLAG: $(TMP_DIR_MOUNT_FLAG))
-	docker run \
-	  --rm \
-	  $(TMP_DIR_MOUNT_FLAG) \
-	  --mount type=bind,source=`pwd`,destination=/go/src/go.etcd.io/etcd \
-	  gcr.io/etcd-development/etcd-test:go$(GO_VERSION) \
-	  /bin/bash ./scripts/codecov_upload.sh docker-test-coverage-$(TEST_SUFFIX).log \
-	! egrep "(--- FAIL:|FAIL:|DATA RACE|panic: test timed out|appears to have leaked)" -B50 -A10 docker-test-coverage-$(TEST_SUFFIX).log
-
-
-# Example:
-#   ETCD_VERSION=v3-test make build-docker-release-main
-#   ETCD_VERSION=v3-test make push-docker-release-main
-#   gsutil -m acl ch -u allUsers:R -r gs://artifacts.etcd-development.appspot.com
-
-build-docker-release-main:
-	$(info ETCD_VERSION: $(ETCD_VERSION))
-	cp ./Dockerfile-release.$(ARCH) ./bin/Dockerfile-release.$(ARCH)
-	docker build \
-	  --network=host \
-	  --tag gcr.io/etcd-development/etcd:$(ETCD_VERSION) \
-	  --file ./bin/Dockerfile-release.$(ARCH) \
-	  ./bin
-	rm -f ./bin/Dockerfile-release.$(ARCH)
-
-	docker run \
-	  --rm \
-	  gcr.io/etcd-development/etcd:$(ETCD_VERSION) \
-	  /bin/sh -c "/usr/local/bin/etcd --version && /usr/local/bin/etcdctl version && /usr/local/bin/etcdutl version"
-
-push-docker-release-main:
-	$(info ETCD_VERSION: $(ETCD_VERSION))
-	docker push gcr.io/etcd-development/etcd:$(ETCD_VERSION)
+.PHONY: update-go-workspace
+update-go-workspace:
+	./scripts/update_go_workspace.sh

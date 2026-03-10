@@ -23,10 +23,10 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
-
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -47,9 +47,10 @@ var (
 // NewWatchCommand returns the cobra command for "watch".
 func NewWatchCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "watch [options] [key or prefix] [range_end] [--] [exec-command arg1 arg2 ...]",
-		Short: "Watches events stream on keys or prefixes",
-		Run:   watchCommandFunc,
+		Use:     "watch [options] [key or prefix] [range_end] [--] [exec-command arg1 arg2 ...]",
+		Short:   "Watches events stream on keys or prefixes",
+		Run:     watchCommandFunc,
+		GroupID: groupKVID,
 	}
 
 	cmd.Flags().BoolVarP(&watchInteractive, "interactive", "i", false, "Interactive mode")
@@ -99,7 +100,7 @@ func watchInteractiveFunc(cmd *cobra.Command, osArgs []string, envKey, envRange 
 	for {
 		l, err := reader.ReadString('\n')
 		if err != nil {
-			cobrautl.ExitWithError(cobrautl.ExitInvalidInput, fmt.Errorf("error reading watch request line: %v", err))
+			cobrautl.ExitWithError(cobrautl.ExitInvalidInput, fmt.Errorf("error reading watch request line: %w", err))
 		}
 		l = strings.TrimSuffix(l, "\n")
 
@@ -134,7 +135,6 @@ func watchInteractiveFunc(cmd *cobra.Command, osArgs []string, envKey, envRange 
 			fmt.Fprintf(os.Stderr, "Invalid command %s (only support watch)\n", l)
 			continue
 		}
-
 	}
 }
 

@@ -21,12 +21,12 @@ import (
 	"os"
 	"sync"
 
-	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/client/v3/naming/endpoints"
+	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 
-	"go.uber.org/zap"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/naming/endpoints"
 )
 
 // allow maximum 1 retry per second
@@ -45,6 +45,9 @@ type clusterProxy struct {
 
 	umu  sync.RWMutex
 	umap map[string]endpoints.Endpoint
+
+	// we want compile errors if new methods are added
+	pb.UnsafeClusterServer
 }
 
 // NewClusterProxy takes optional prefix to fetch grpc-proxy member endpoints.
@@ -107,14 +110,18 @@ func (cp *clusterProxy) monitor(wa endpoints.WatchChannel) {
 		case <-cp.ctx.Done():
 			cp.lg.Info("watching endpoints interrupted", zap.Error(cp.ctx.Err()))
 			return
-		case updates := <-wa:
+		case updates, ok := <-wa:
+			if !ok {
+				cp.lg.Info("endpoints watch channel closed")
+				return
+			}
 			cp.umu.Lock()
 			for _, up := range updates {
 				switch up.Op {
 				case endpoints.Add:
-					cp.umap[up.Endpoint.Addr] = up.Endpoint
+					cp.umap[up.Key] = up.Endpoint
 				case endpoints.Delete:
-					delete(cp.umap, up.Endpoint.Addr)
+					delete(cp.umap, up.Key)
 				}
 			}
 			cp.umu.Unlock()
@@ -138,12 +145,12 @@ func (cp *clusterProxy) membersFromUpdates() ([]*pb.Member, error) {
 	cp.umu.RLock()
 	defer cp.umu.RUnlock()
 	mbs := make([]*pb.Member, 0, len(cp.umap))
-	for addr, upt := range cp.umap {
-		m, err := decodeMeta(fmt.Sprint(upt.Metadata))
+	for _, upt := range cp.umap {
+		m, err := decodeMeta(fmt.Sprint(upt.Metadata)) //nolint:staticcheck // TODO: remove for a supported version
 		if err != nil {
 			return nil, err
 		}
-		mbs = append(mbs, &pb.Member{Name: m.Name, ClientURLs: []string{addr}})
+		mbs = append(mbs, &pb.Member{Name: m.Name, ClientURLs: []string{upt.Addr}})
 	}
 	return mbs, nil
 }

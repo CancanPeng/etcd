@@ -16,6 +16,7 @@ package lease
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,12 +27,13 @@ import (
 	"time"
 
 	"github.com/coreos/go-semver/semver"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
+
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	"go.etcd.io/etcd/server/v3/storage/schema"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 )
 
 const (
@@ -207,6 +209,29 @@ func TestLessorRevoke(t *testing.T) {
 	}
 }
 
+func renew(t *testing.T, le *lessor, id LeaseID) int64 {
+	ch := make(chan int64, 1)
+	errch := make(chan error, 1)
+	go func() {
+		ttl, err := le.Renew(id)
+		if err != nil {
+			errch <- err
+		} else {
+			ch <- ttl
+		}
+	}()
+
+	select {
+	case ttl := <-ch:
+		return ttl
+	case err := <-errch:
+		t.Fatalf("failed to renew lease (%v)", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out while renewing lease")
+	}
+	panic("unreachable")
+}
+
 // TestLessorRenew ensures Lessor can renew an existing lease.
 func TestLessorRenew(t *testing.T) {
 	lg := zap.NewNop()
@@ -227,10 +252,7 @@ func TestLessorRenew(t *testing.T) {
 	le.mu.Lock()
 	l.ttl = 10
 	le.mu.Unlock()
-	ttl, err := le.Renew(l.ID)
-	if err != nil {
-		t.Fatalf("failed to renew lease (%v)", err)
-	}
+	ttl := renew(t, le, l.ID)
 	if ttl != l.ttl {
 		t.Errorf("ttl = %d, want %d", ttl, l.ttl)
 	}
@@ -248,10 +270,11 @@ func TestLessorRenewWithCheckpointer(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	le := newLessor(lg, be, clusterLatest(), LessorConfig{MinLeaseTTL: minLeaseTTL})
-	fakerCheckerpointer := func(ctx context.Context, cp *pb.LeaseCheckpointRequest) {
+	fakerCheckerpointer := func(ctx context.Context, cp *pb.LeaseCheckpointRequest) error {
 		for _, cp := range cp.GetCheckpoints() {
 			le.Checkpoint(LeaseID(cp.GetID()), cp.GetRemaining_TTL())
 		}
+		return nil
 	}
 	defer le.Stop()
 	// Set checkpointer
@@ -268,10 +291,7 @@ func TestLessorRenewWithCheckpointer(t *testing.T) {
 	l.ttl = 10
 	l.remainingTTL = 10
 	le.mu.Unlock()
-	ttl, err := le.Renew(l.ID)
-	if err != nil {
-		t.Fatalf("failed to renew lease (%v)", err)
-	}
+	ttl := renew(t, le, l.ID)
 	if ttl != l.ttl {
 		t.Errorf("ttl = %d, want %d", ttl, l.ttl)
 	}
@@ -288,17 +308,15 @@ func TestLessorRenewWithCheckpointer(t *testing.T) {
 // TestLessorRenewExtendPileup ensures Lessor extends leases on promotion if too many
 // expire at the same time.
 func TestLessorRenewExtendPileup(t *testing.T) {
-	oldRevokeRate := leaseRevokeRate
-	defer func() { leaseRevokeRate = oldRevokeRate }()
+	leaseRevokeRate := 10
 	lg := zap.NewNop()
-	leaseRevokeRate = 10
 
 	dir, be := NewTestBackend(t)
 	defer os.RemoveAll(dir)
 
-	le := newLessor(lg, be, clusterLatest(), LessorConfig{MinLeaseTTL: minLeaseTTL})
+	le := newLessor(lg, be, clusterLatest(), LessorConfig{MinLeaseTTL: minLeaseTTL, leaseRevokeRate: leaseRevokeRate})
 	ttl := int64(10)
-	for i := 1; i <= leaseRevokeRate*10; i++ {
+	for i := 1; i <= le.leaseRevokeRate*10; i++ {
 		if _, err := le.Grant(LeaseID(2*i), ttl); err != nil {
 			t.Fatal(err)
 		}
@@ -315,7 +333,7 @@ func TestLessorRenewExtendPileup(t *testing.T) {
 	bcfg.Path = filepath.Join(dir, "be")
 	be = backend.New(bcfg)
 	defer be.Close()
-	le = newLessor(lg, be, clusterLatest(), LessorConfig{MinLeaseTTL: minLeaseTTL})
+	le = newLessor(lg, be, clusterLatest(), LessorConfig{MinLeaseTTL: minLeaseTTL, leaseRevokeRate: leaseRevokeRate})
 	defer le.Stop()
 
 	// extend after recovery should extend expiration on lease pile-up
@@ -330,11 +348,11 @@ func TestLessorRenewExtendPileup(t *testing.T) {
 
 	for i := ttl; i < ttl+20; i++ {
 		c := windowCounts[i]
-		if c > leaseRevokeRate {
-			t.Errorf("expected at most %d expiring at %ds, got %d", leaseRevokeRate, i, c)
+		if c > le.leaseRevokeRate {
+			t.Errorf("expected at most %d expiring at %ds, got %d", le.leaseRevokeRate, i, c)
 		}
-		if c < leaseRevokeRate/2 {
-			t.Errorf("expected at least %d expiring at %ds, got %d", leaseRevokeRate/2, i, c)
+		if c < le.leaseRevokeRate/2 {
+			t.Errorf("expected at least %d expiring at %ds, got %d", le.leaseRevokeRate/2, i, c)
 		}
 	}
 }
@@ -437,7 +455,7 @@ func TestLessorExpire(t *testing.T) {
 	donec := make(chan struct{}, 1)
 	go func() {
 		// expired lease cannot be renewed
-		if _, err := le.Renew(l.ID); err != ErrLeaseNotFound {
+		if _, err := le.Renew(l.ID); !errors.Is(err, ErrLeaseNotFound) {
 			t.Errorf("unexpected renew")
 		}
 		donec <- struct{}{}
@@ -490,7 +508,7 @@ func TestLessorExpireAndDemote(t *testing.T) {
 	donec := make(chan struct{}, 1)
 	go func() {
 		// expired lease cannot be renewed
-		if _, err := le.Renew(l.ID); err != ErrNotPrimary {
+		if _, err := le.Renew(l.ID); !errors.Is(err, ErrNotPrimary) {
 			t.Errorf("unexpected renew: %v", err)
 		}
 		donec <- struct{}{}
@@ -522,7 +540,7 @@ func TestLessorMaxTTL(t *testing.T) {
 	defer le.Stop()
 
 	_, err := le.Grant(1, MaxLeaseTTL+1)
-	if err != ErrLeaseTTLTooLarge {
+	if !errors.Is(err, ErrLeaseTTLTooLarge) {
 		t.Fatalf("grant unexpectedly succeeded")
 	}
 }
@@ -538,7 +556,7 @@ func TestLessorCheckpointScheduling(t *testing.T) {
 	defer le.Stop()
 	le.minLeaseTTL = 1
 	checkpointedC := make(chan struct{})
-	le.SetCheckpointer(func(ctx context.Context, lc *pb.LeaseCheckpointRequest) {
+	le.SetCheckpointer(func(ctx context.Context, lc *pb.LeaseCheckpointRequest) error {
 		close(checkpointedC)
 		if len(lc.Checkpoints) != 1 {
 			t.Errorf("expected 1 checkpoint but got %d", len(lc.Checkpoints))
@@ -547,6 +565,7 @@ func TestLessorCheckpointScheduling(t *testing.T) {
 		if c.Remaining_TTL != 1 {
 			t.Errorf("expected checkpoint to be called with Remaining_TTL=%d but got %d", 1, c.Remaining_TTL)
 		}
+		return nil
 	})
 	_, err := le.Grant(1, 2)
 	if err != nil {

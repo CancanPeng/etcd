@@ -19,7 +19,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"go.etcd.io/etcd/client/v3"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 )
 
@@ -31,8 +32,10 @@ var (
 // NewRoleCommand returns the cobra command for "role".
 func NewRoleCommand() *cobra.Command {
 	ac := &cobra.Command{
-		Use:   "role <subcommand>",
-		Short: "Role related commands",
+		Use:     "role <subcommand>",
+		Short:   "Role related commands. Use `etcdctl role --help` to see subcommands",
+		Long:    "Role related commands",
+		GroupID: groupAuthenticationID,
 	}
 
 	ac.AddCommand(newRoleAddCommand())

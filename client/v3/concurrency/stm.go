@@ -47,7 +47,7 @@ const (
 	// for write conflicts.
 	SerializableSnapshot Isolation = iota
 	// Serializable reads within the same transaction attempt return data
-	// from the at the revision of the first read.
+	// from the revision of the first read.
 	Serializable
 	// RepeatableReads reads within the same transaction attempt always
 	// return the same data.
@@ -303,6 +303,10 @@ type stmSerializable struct {
 }
 
 func (s *stmSerializable) Get(keys ...string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+
 	if wv := s.wset.get(keys...); wv != nil {
 		return wv.val
 	}

@@ -15,44 +15,47 @@
 package testing
 
 import (
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"testing"
 
+	"go.uber.org/zap/zaptest"
+
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/pkg/v3/pbutil"
-	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/storage/wal"
 	"go.etcd.io/etcd/server/v3/storage/wal/walpb"
-	"go.uber.org/zap/zaptest"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
-func NewTmpWAL(t testing.TB, reqs []etcdserverpb.InternalRaftRequest) (*wal.WAL, string) {
-	t.Helper()
-	dir, err := ioutil.TempDir(t.TempDir(), "etcd_wal_test")
+func NewTmpWAL(tb testing.TB, reqs []etcdserverpb.InternalRaftRequest) (*wal.WAL, string) {
+	tb.Helper()
+	dir, err := os.MkdirTemp(tb.TempDir(), "etcd_wal_test")
 	if err != nil {
 		panic(err)
 	}
 	tmpPath := filepath.Join(dir, "wal")
-	lg := zaptest.NewLogger(t)
+	lg := zaptest.NewLogger(tb)
 	w, err := wal.Create(lg, tmpPath, nil)
 	if err != nil {
-		t.Fatalf("Failed to create WAL: %v", err)
+		tb.Fatalf("Failed to create WAL: %v", err)
 	}
 	err = w.Close()
 	if err != nil {
-		t.Fatalf("Failed to close WAL: %v", err)
+		tb.Fatalf("Failed to close WAL: %v", err)
 	}
 	if len(reqs) != 0 {
 		w, err = wal.Open(lg, tmpPath, walpb.Snapshot{})
 		if err != nil {
-			t.Fatalf("Failed to open WAL: %v", err)
+			tb.Fatalf("Failed to open WAL: %v", err)
 		}
-		_, state, _, err := w.ReadAll()
+
+		var state raftpb.HardState
+		_, state, _, err = w.ReadAll()
 		if err != nil {
-			t.Fatalf("Failed to read WAL: %v", err)
+			tb.Fatalf("Failed to read WAL: %v", err)
 		}
-		entries := []raftpb.Entry{}
+		var entries []raftpb.Entry
 		for _, req := range reqs {
 			entries = append(entries, raftpb.Entry{
 				Term:  1,
@@ -63,27 +66,27 @@ func NewTmpWAL(t testing.TB, reqs []etcdserverpb.InternalRaftRequest) (*wal.WAL,
 		}
 		err = w.Save(state, entries)
 		if err != nil {
-			t.Fatalf("Failed to save WAL: %v", err)
+			tb.Fatalf("Failed to save WAL: %v", err)
 		}
 		err = w.Close()
 		if err != nil {
-			t.Fatalf("Failed to close WAL: %v", err)
+			tb.Fatalf("Failed to close WAL: %v", err)
 		}
 	}
 
 	w, err = wal.OpenForRead(lg, tmpPath, walpb.Snapshot{})
 	if err != nil {
-		t.Fatalf("Failed to open WAL: %v", err)
+		tb.Fatalf("Failed to open WAL: %v", err)
 	}
 	return w, tmpPath
 }
 
-func Reopen(t testing.TB, walPath string) *wal.WAL {
-	t.Helper()
-	lg := zaptest.NewLogger(t)
+func Reopen(tb testing.TB, walPath string) *wal.WAL {
+	tb.Helper()
+	lg := zaptest.NewLogger(tb)
 	w, err := wal.OpenForRead(lg, walPath, walpb.Snapshot{})
 	if err != nil {
-		t.Fatalf("Failed to open WAL: %v", err)
+		tb.Fatalf("Failed to open WAL: %v", err)
 	}
 	return w
 }

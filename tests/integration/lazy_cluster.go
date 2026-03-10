@@ -31,16 +31,16 @@ import (
 // See ./tests/integration/clientv3/examples/main_test.go for canonical usage.
 // Please notice that the shared (LazyCluster's) state is preserved between
 // testcases, so left-over state might has cross-testcase effects.
-// Prefer dedicated clusters for substancial test-cases.
+// Prefer dedicated clusters for substantial test-cases.
 
 type LazyCluster interface {
-	// EndpointsV2 - exposes connection points for client v2.
+	// EndpointsHTTP - exposes connection points for http endpoints.
 	// Calls to this method might initialize the cluster.
-	EndpointsV2() []string
+	EndpointsHTTP() []string
 
-	// EndpointsV3 - exposes connection points for client v3.
+	// EndpointsGRPC - exposes connection points for client v3.
 	// Calls to this method might initialize the cluster.
-	EndpointsV3() []string
+	EndpointsGRPC() []string
 
 	// Cluster - calls to this method might initialize the cluster.
 	Cluster() *integration.Cluster
@@ -89,7 +89,10 @@ func (lc *lazyCluster) mustLazyInit() {
 }
 
 func (lc *lazyCluster) Terminate() {
-	lc.tb.Logf("Terminating...")
+	if lc != nil && lc.tb != nil {
+		lc.tb.Logf("Terminating...")
+	}
+
 	if lc != nil && lc.cluster != nil {
 		lc.cluster.Terminate(nil)
 		lc.cluster = nil
@@ -100,11 +103,11 @@ func (lc *lazyCluster) Terminate() {
 	}
 }
 
-func (lc *lazyCluster) EndpointsV2() []string {
+func (lc *lazyCluster) EndpointsHTTP() []string {
 	return []string{lc.Cluster().Members[0].URL()}
 }
 
-func (lc *lazyCluster) EndpointsV3() []string {
+func (lc *lazyCluster) EndpointsGRPC() []string {
 	return lc.Cluster().Client(0).Endpoints()
 }
 

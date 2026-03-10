@@ -16,14 +16,21 @@ package mvcc
 
 import (
 	"encoding/binary"
+	"fmt"
 	"time"
 
-	"go.etcd.io/etcd/server/v3/storage/schema"
+	humanize "github.com/dustin/go-humanize"
 	"go.uber.org/zap"
+
+	"go.etcd.io/etcd/server/v3/storage/schema"
 )
 
-func (s *store) scheduleCompaction(compactMainRev int64, keep map[revision]struct{}) bool {
+func (s *store) scheduleCompaction(compactMainRev, prevCompactRev int64) (KeyValueHash, error) {
 	totalStart := time.Now()
+	keep := s.kvindex.Compact(compactMainRev)
+	indexCompactionPauseMs.Observe(float64(time.Since(totalStart) / time.Millisecond))
+
+	totalStart = time.Now()
 	defer func() { dbCompactionTotalMs.Observe(float64(time.Since(totalStart) / time.Millisecond)) }()
 	keyCompactions := 0
 	defer func() { dbCompactionKeysCounter.Add(float64(keyCompactions)) }()
@@ -33,47 +40,61 @@ func (s *store) scheduleCompaction(compactMainRev int64, keep map[revision]struc
 	binary.BigEndian.PutUint64(end, uint64(compactMainRev+1))
 
 	batchNum := s.cfg.CompactionBatchLimit
-	batchInterval := s.cfg.CompactionSleepInterval
-
+	h := newKVHasher(prevCompactRev, compactMainRev, keep)
 	last := make([]byte, 8+1+8)
 	for {
-		var rev revision
+		var rev Revision
 
 		start := time.Now()
 
 		tx := s.b.BatchTx()
 		tx.LockOutsideApply()
-		keys, _ := tx.UnsafeRange(schema.Key, last, end, int64(batchNum))
-		for _, key := range keys {
-			rev = bytesToRev(key)
+		// gofail: var compactAfterAcquiredBatchTxLock struct{}
+		keys, values := tx.UnsafeRange(schema.Key, last, end, int64(batchNum))
+		for i := range keys {
+			rev = BytesToRev(keys[i])
 			if _, ok := keep[rev]; !ok {
-				tx.UnsafeDelete(schema.Key, key)
+				tx.UnsafeDelete(schema.Key, keys[i])
 				keyCompactions++
 			}
+			h.WriteKeyValue(keys[i], values[i])
 		}
 
 		if len(keys) < batchNum {
+			// gofail: var compactBeforeSetFinishedCompact struct{}
 			UnsafeSetFinishedCompact(tx, compactMainRev)
 			tx.Unlock()
+			dbCompactionPauseMs.Observe(float64(time.Since(start) / time.Millisecond))
+			// gofail: var compactAfterSetFinishedCompact struct{}
+			hash := h.Hash()
+			size, sizeInUse := s.b.Size(), s.b.SizeInUse()
 			s.lg.Info(
 				"finished scheduled compaction",
 				zap.Int64("compact-revision", compactMainRev),
 				zap.Duration("took", time.Since(totalStart)),
+				zap.Int("number-of-keys-compacted", keyCompactions),
+				zap.Uint32("hash", hash.Hash),
+				zap.Int64("current-db-size-bytes", size),
+				zap.String("current-db-size", humanize.Bytes(uint64(size))),
+				zap.Int64("current-db-size-in-use-bytes", sizeInUse),
+				zap.String("current-db-size-in-use", humanize.Bytes(uint64(sizeInUse))),
 			)
-			return true
+			return hash, nil
 		}
 
 		tx.Unlock()
 		// update last
-		revToBytes(revision{main: rev.main, sub: rev.sub + 1}, last)
+		last = RevToBytes(Revision{Main: rev.Main, Sub: rev.Sub + 1}, last)
 		// Immediately commit the compaction deletes instead of letting them accumulate in the write buffer
+		// gofail: var compactBeforeCommitBatch struct{}
 		s.b.ForceCommit()
+		// gofail: var compactAfterCommitBatch struct{}
 		dbCompactionPauseMs.Observe(float64(time.Since(start) / time.Millisecond))
 
 		select {
-		case <-time.After(batchInterval):
+		case <-time.After(s.cfg.CompactionSleepInterval):
 		case <-s.stopc:
-			return false
+			return KeyValueHash{}, fmt.Errorf("interrupted due to stop signal")
 		}
 	}
 }

@@ -15,228 +15,204 @@
 package e2e
 
 import (
-	"bytes"
+	"context"
 	"fmt"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
+
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
+	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/server/v3/etcdserver"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
 	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
-	"go.uber.org/zap/zaptest"
 )
 
-func createV2store(t testing.TB, lastReleaseBinary string, dataDirPath string) {
-	t.Log("Creating not-yet v2-deprecated etcd")
-
-	cfg := e2e.ConfigStandalone(e2e.EtcdProcessClusterConfig{ExecPath: lastReleaseBinary, EnableV2: true, DataDirPath: dataDirPath, SnapshotCount: 5})
-	epc, err := e2e.NewEtcdProcessCluster(t, cfg)
-	assert.NoError(t, err)
-
-	defer func() {
-		assert.NoError(t, epc.Stop())
-	}()
-
-	// We need to exceed 'SnapshotCount' such that v2 snapshot is dumped.
-	for i := 0; i < 10; i++ {
-		if err := e2e.CURLPut(epc, e2e.CURLReq{
-			Endpoint: "/v2/keys/foo", Value: "bar" + fmt.Sprint(i),
-			Expected: `{"action":"set","node":{"key":"/foo","value":"bar` + fmt.Sprint(i)}); err != nil {
-			t.Fatalf("failed put with curl (%v)", err)
-		}
-	}
-}
-
-func assertVerifyCannotStartV2deprecationWriteOnly(t testing.TB, dataDirPath string) {
-	t.Log("Verify its infeasible to start etcd with --v2-deprecation=write-only mode")
-	proc, err := e2e.SpawnCmd([]string{e2e.BinDir + "/etcd", "--v2-deprecation=write-only", "--data-dir=" + dataDirPath}, nil)
-	assert.NoError(t, err)
-
-	_, err = proc.Expect("detected disallowed custom content in v2store for stage --v2-deprecation=write-only")
-	assert.NoError(t, err)
-}
-
-func assertVerifyCannotStartV2deprecationNotYet(t testing.TB, dataDirPath string) {
+func TestV2DeprecationNotYet(t *testing.T) {
+	e2e.BeforeTest(t)
 	t.Log("Verify its infeasible to start etcd with --v2-deprecation=not-yet mode")
-	proc, err := e2e.SpawnCmd([]string{e2e.BinDir + "/etcd", "--v2-deprecation=not-yet", "--data-dir=" + dataDirPath}, nil)
-	assert.NoError(t, err)
+	proc, err := e2e.SpawnCmd([]string{e2e.BinPath.Etcd, "--v2-deprecation=not-yet"}, nil)
+	require.NoError(t, err)
 
 	_, err = proc.Expect(`invalid value "not-yet" for flag -v2-deprecation: invalid value "not-yet"`)
 	assert.NoError(t, err)
 }
 
-func TestV2DeprecationFlags(t *testing.T) {
-	e2e.BeforeTest(t)
-	dataDirPath := t.TempDir()
-
-	lastReleaseBinary := e2e.BinDir + "/etcd-last-release"
-	if !fileutil.Exist(lastReleaseBinary) {
-		t.Skipf("%q does not exist", lastReleaseBinary)
-	}
-
-	t.Run("create-storev2-data", func(t *testing.T) {
-		createV2store(t, lastReleaseBinary, dataDirPath)
-	})
-
-	t.Run("--v2-deprecation=not-yet fails", func(t *testing.T) {
-		assertVerifyCannotStartV2deprecationNotYet(t, dataDirPath)
-	})
-
-	t.Run("--v2-deprecation=write-only fails", func(t *testing.T) {
-		assertVerifyCannotStartV2deprecationWriteOnly(t, dataDirPath)
-	})
-
-}
-
+// TestV2DeprecationSnapshotMatches ensures that etcd v3.7 still commits v2 store
+// changes to the snapshot for backwards compatibility.
 func TestV2DeprecationSnapshotMatches(t *testing.T) {
 	e2e.BeforeTest(t)
 	lastReleaseData := t.TempDir()
 	currentReleaseData := t.TempDir()
-
-	lastReleaseBinary := e2e.BinDir + "/etcd-last-release"
-	currentReleaseBinary := e2e.BinDir + "/etcd"
-
-	if !fileutil.Exist(lastReleaseBinary) {
-		t.Skipf("%q does not exist", lastReleaseBinary)
+	if !fileutil.Exist(e2e.BinPath.EtcdLastRelease) {
+		t.Skipf("%q does not exist", e2e.BinPath.EtcdLastRelease)
 	}
-	snapshotCount := 10
-	epc := runEtcdAndCreateSnapshot(t, lastReleaseBinary, lastReleaseData, snapshotCount)
-	members1 := addAndRemoveKeysAndMembers(t, e2e.NewEtcdctl(epc.Cfg, epc.EndpointsV3()), snapshotCount)
-	assert.NoError(t, epc.Close())
-	epc = runEtcdAndCreateSnapshot(t, currentReleaseBinary, currentReleaseData, snapshotCount)
-	members2 := addAndRemoveKeysAndMembers(t, e2e.NewEtcdctl(epc.Cfg, epc.EndpointsV3()), snapshotCount)
-	assert.NoError(t, epc.Close())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
-	assertSnapshotsMatch(t, lastReleaseData, currentReleaseData, func(data []byte) []byte {
-		// Patch cluster version
-		data = bytes.Replace(data, []byte("3.5.0"), []byte("X.X.X"), -1)
-		data = bytes.Replace(data, []byte("3.6.0"), []byte("X.X.X"), -1)
-		// Patch members ids
-		for i, mid := range members1 {
-			data = bytes.Replace(data, []byte(fmt.Sprintf("%x", mid)), []byte(fmt.Sprintf("member%d", i+1)), -1)
-		}
-		for i, mid := range members2 {
-			data = bytes.Replace(data, []byte(fmt.Sprintf("%x", mid)), []byte(fmt.Sprintf("member%d", i+1)), -1)
-		}
-		return data
-	})
+	var snapshotCount uint64 = 10
+
+	epc := runEtcdAndCreateSnapshot(t, e2e.LastVersion, lastReleaseData, snapshotCount)
+	oldMemberDataDir := epc.Procs[0].Config().DataDirPath
+	cc1 := epc.Etcdctl()
+	addAndRemoveKeysAndMembers(ctx, t, cc1, snapshotCount)
+	require.NoError(t, epc.Close())
+
+	epc = runEtcdAndCreateSnapshot(t, e2e.CurrentVersion, currentReleaseData, snapshotCount)
+	newMemberDataDir := epc.Procs[0].Config().DataDirPath
+	cc2 := epc.Etcdctl()
+	addAndRemoveKeysAndMembers(ctx, t, cc2, snapshotCount)
+	require.NoError(t, epc.Close())
+
+	assertSnapshotsMatch(t, oldMemberDataDir, newMemberDataDir)
+}
+
+func addAndRemoveKeysAndMembers(ctx context.Context, tb testing.TB, cc *e2e.EtcdctlV3, snapshotCount uint64) {
+	// Execute some non-trivial key&member operation
+	var i uint64
+	for i = 0; i < snapshotCount*3; i++ {
+		_, err := cc.Put(ctx, fmt.Sprintf("%d", i), "1", config.PutOptions{})
+		require.NoError(tb, err)
+	}
+	member1, err := cc.MemberAddAsLearner(ctx, "member1", []string{"http://127.0.0.1:2000"})
+	require.NoError(tb, err)
+
+	for i = 0; i < snapshotCount*2; i++ {
+		_, err = cc.Delete(ctx, fmt.Sprintf("%d", i), config.DeleteOptions{})
+		require.NoError(tb, err)
+	}
+	_, err = cc.MemberRemove(ctx, member1.Member.ID)
+	require.NoError(tb, err)
+
+	for i = 0; i < snapshotCount; i++ {
+		_, err = cc.Put(ctx, fmt.Sprintf("%d", i), "2", config.PutOptions{})
+		require.NoError(tb, err)
+	}
+	_, err = cc.MemberAddAsLearner(ctx, "member2", []string{"http://127.0.0.1:2001"})
+	require.NoError(tb, err)
+
+	for i = 0; i < snapshotCount/2; i++ {
+		_, err = cc.Put(ctx, fmt.Sprintf("%d", i), "3", config.PutOptions{})
+		assert.NoError(tb, err)
+	}
 }
 
 func TestV2DeprecationSnapshotRecover(t *testing.T) {
 	e2e.BeforeTest(t)
 	dataDir := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
-	lastReleaseBinary := e2e.BinDir + "/etcd-last-release"
-	currentReleaseBinary := e2e.BinDir + "/etcd"
-
-	if !fileutil.Exist(lastReleaseBinary) {
-		t.Skipf("%q does not exist", lastReleaseBinary)
+	if !fileutil.Exist(e2e.BinPath.EtcdLastRelease) {
+		t.Skipf("%q does not exist", e2e.BinPath.EtcdLastRelease)
 	}
-	epc := runEtcdAndCreateSnapshot(t, lastReleaseBinary, dataDir, 10)
+	epc := runEtcdAndCreateSnapshot(t, e2e.LastVersion, dataDir, 10)
 
-	cc := e2e.NewEtcdctl(epc.Cfg, epc.EndpointsV3())
+	cc := epc.Etcdctl()
+	lastReleaseGetResponse, err := cc.Get(ctx, "", config.GetOptions{Prefix: true})
+	require.NoError(t, err)
 
-	lastReleaseGetResponse, err := cc.Get("", config.GetOptions{Prefix: true})
-	assert.NoError(t, err)
-
-	lastReleaseMemberListResponse, err := cc.MemberList()
+	lastReleaseMemberListResponse, err := cc.MemberList(ctx, false)
 	assert.NoError(t, err)
 
 	assert.NoError(t, epc.Close())
-	cfg := e2e.ConfigStandalone(e2e.EtcdProcessClusterConfig{ExecPath: currentReleaseBinary, DataDirPath: dataDir})
-	epc, err = e2e.NewEtcdProcessCluster(t, cfg)
-	assert.NoError(t, err)
+	cfg := e2e.ConfigStandalone(*e2e.NewConfig(
+		e2e.WithVersion(e2e.CurrentVersion),
+		e2e.WithDataDirPath(dataDir),
+	))
+	epc, err = e2e.NewEtcdProcessCluster(t.Context(), t, e2e.WithConfig(cfg))
+	require.NoError(t, err)
 
-	cc = e2e.NewEtcdctl(epc.Cfg, epc.EndpointsV3())
-	currentReleaseGetResponse, err := cc.Get("", config.GetOptions{Prefix: true})
-	assert.NoError(t, err)
+	cc = epc.Etcdctl()
+	currentReleaseGetResponse, err := cc.Get(ctx, "", config.GetOptions{Prefix: true})
+	require.NoError(t, err)
 
-	currentReleaseMemberListResponse, err := cc.MemberList()
-	assert.NoError(t, err)
+	currentReleaseMemberListResponse, err := cc.MemberList(ctx, false)
+	require.NoError(t, err)
 
 	assert.Equal(t, lastReleaseGetResponse.Kvs, currentReleaseGetResponse.Kvs)
 	assert.Equal(t, lastReleaseMemberListResponse.Members, currentReleaseMemberListResponse.Members)
 	assert.NoError(t, epc.Close())
 }
 
-func runEtcdAndCreateSnapshot(t testing.TB, binary, dataDir string, snapshotCount int) *e2e.EtcdProcessCluster {
-	cfg := e2e.ConfigStandalone(e2e.EtcdProcessClusterConfig{ExecPath: binary, DataDirPath: dataDir, SnapshotCount: snapshotCount, KeepDataDir: true})
-	epc, err := e2e.NewEtcdProcessCluster(t, cfg)
-	assert.NoError(t, err)
+func runEtcdAndCreateSnapshot(tb testing.TB, serverVersion e2e.ClusterVersion, dataDir string, snapshotCount uint64) *e2e.EtcdProcessCluster {
+	cfg := e2e.ConfigStandalone(*e2e.NewConfig(
+		e2e.WithVersion(serverVersion),
+		e2e.WithDataDirPath(dataDir),
+		e2e.WithSnapshotCount(snapshotCount),
+		e2e.WithKeepDataDir(true),
+	))
+	epc, err := e2e.NewEtcdProcessCluster(tb.Context(), tb, e2e.WithConfig(cfg))
+	assert.NoError(tb, err)
 	return epc
-}
-
-func addAndRemoveKeysAndMembers(t testing.TB, cc *e2e.EtcdctlV3, snapshotCount int) (members []uint64) {
-	// Execute some non-trivial key&member operation
-	for i := 0; i < snapshotCount*3; i++ {
-		err := cc.Put(fmt.Sprintf("%d", i), "1", config.PutOptions{})
-		assert.NoError(t, err)
-	}
-	member1, err := cc.MemberAddAsLearner("member1", []string{"http://127.0.0.1:2000"})
-	assert.NoError(t, err)
-	members = append(members, member1.Member.ID)
-
-	for i := 0; i < snapshotCount*2; i++ {
-		_, err = cc.Delete(fmt.Sprintf("%d", i), config.DeleteOptions{})
-		assert.NoError(t, err)
-	}
-	_, err = cc.MemberRemove(member1.Member.ID)
-	assert.NoError(t, err)
-
-	for i := 0; i < snapshotCount; i++ {
-		err = cc.Put(fmt.Sprintf("%d", i), "2", config.PutOptions{})
-		assert.NoError(t, err)
-	}
-	member2, err := cc.MemberAddAsLearner("member2", []string{"http://127.0.0.1:2001"})
-	assert.NoError(t, err)
-	members = append(members, member2.Member.ID)
-
-	for i := 0; i < snapshotCount/2; i++ {
-		err = cc.Put(fmt.Sprintf("%d", i), "3", config.PutOptions{})
-		assert.NoError(t, err)
-	}
-	return members
 }
 
 func filterSnapshotFiles(path string) bool {
 	return strings.HasSuffix(path, ".snap")
 }
 
-func assertSnapshotsMatch(t testing.TB, firstDataDir, secondDataDir string, patch func([]byte) []byte) {
-	lg := zaptest.NewLogger(t)
+func assertSnapshotsMatch(tb testing.TB, firstDataDir, secondDataDir string) {
+	lg := zaptest.NewLogger(tb)
+
 	firstFiles, err := fileutil.ListFiles(firstDataDir, filterSnapshotFiles)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(tb, err)
+
 	secondFiles, err := fileutil.ListFiles(secondDataDir, filterSnapshotFiles)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assert.NotEmpty(t, firstFiles)
-	assert.NotEmpty(t, secondFiles)
-	assert.Equal(t, len(firstFiles), len(secondFiles))
+	require.NoError(tb, err)
+
+	assert.NotEmpty(tb, firstFiles)
+	assert.NotEmpty(tb, secondFiles)
+	assert.Len(tb, secondFiles, len(firstFiles))
+
 	sort.Strings(firstFiles)
 	sort.Strings(secondFiles)
 	for i := 0; i < len(firstFiles); i++ {
-		firstSnapshot, err := snap.Read(lg, firstFiles[i])
-		if err != nil {
-			t.Fatal(err)
-		}
-		secondSnapshot, err := snap.Read(lg, secondFiles[i])
-		if err != nil {
-			t.Fatal(err)
-		}
-		assert.Equal(t, openSnap(patch(firstSnapshot.Data)), openSnap(patch(secondSnapshot.Data)))
+		assertV2StoreMembershipEqual(tb, lg, firstFiles[i], secondFiles[i])
 	}
 }
 
-func openSnap(data []byte) v2store.Store {
-	st := v2store.New(etcdserver.StoreClusterPrefix, etcdserver.StoreKeysPrefix)
-	st.Recovery(data)
-	return st
+func assertV2StoreMembershipEqual(tb testing.TB, lg *zap.Logger, firstSnapPath, secondSnapPath string) {
+	st1 := loadV2StoreData(tb, lg, firstSnapPath)
+	st2 := loadV2StoreData(tb, lg, secondSnapPath)
+
+	st1Members, st1Deleted := membership.MembersFromStore(lg, st1)
+	st2Members, st2Deleted := membership.MembersFromStore(lg, st2)
+
+	require.Lenf(tb, st1Members, len(st2Members), "number of members in v2 store do not match")
+	require.NotEmptyf(tb, st1Members, "no members found in v2 store")
+	require.Lenf(tb, st1Deleted, len(st2Deleted), "number of deleted members in v2 store do not match")
+
+	// remove ID because original ID was generated from hash of peerURLs + clusterName + time
+	require.Equal(tb, rebuildMembers(tb, st1Members), rebuildMembers(tb, st2Members))
+}
+
+// loadV2StoreData reads v2 store from the snapshot file at fpath.
+func loadV2StoreData(tb testing.TB, lg *zap.Logger, fpath string) v2store.Store {
+	sn, err := snap.Read(lg, fpath)
+	require.NoError(tb, err)
+
+	v2data := v2store.New(etcdserver.StoreClusterPrefix, etcdserver.StoreKeysPrefix)
+	v2data.Recovery(sn.Data)
+	return v2data
+}
+
+// rebuildMembers rebuilds the members map with zeroed IDs and peerURLs as keys.
+func rebuildMembers(tb testing.TB, members map[types.ID]*membership.Member) map[string]*membership.Member {
+	newMembers := make(map[string]*membership.Member)
+	for _, m := range members {
+		peerURLs, err := types.NewURLs(m.PeerURLs)
+		require.NoError(tb, err)
+
+		m.ID = 0
+		newMembers[peerURLs.String()] = m
+	}
+	return newMembers
 }

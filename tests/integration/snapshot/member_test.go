@@ -20,18 +20,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
-	"go.etcd.io/etcd/client/v3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.etcd.io/etcd/server/v3/etcdserver"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 // TestSnapshotV3RestoreMultiMemberAdd ensures that multiple members
 // can boot into the same cluster after being restored from a same
 // snapshot file, and also be able to add another member to the cluster.
 func TestSnapshotV3RestoreMultiMemberAdd(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
 	kvs := []kv{{"foo1", "bar1"}, {"foo2", "bar2"}, {"foo3", "bar3"}}
 	dbPath := createSnapshotFile(t, kvs)
@@ -48,26 +50,23 @@ func TestSnapshotV3RestoreMultiMemberAdd(t *testing.T) {
 	// wait for health interval + leader election
 	time.Sleep(etcdserver.HealthInterval + 2*time.Second)
 
-	cli, err := integration2.NewClient(t, clientv3.Config{Endpoints: []string{cURLs[0].String()}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli, err := integration.NewClient(t, clientv3.Config{Endpoints: []string{cURLs[0].String()}})
+	require.NoError(t, err)
 	defer cli.Close()
 
 	urls := newEmbedURLs(t, 2)
 	newCURLs, newPURLs := urls[:1], urls[1:]
-	if _, err = cli.MemberAdd(context.Background(), []string{newPURLs[0].String()}); err != nil {
-		t.Fatal(err)
-	}
+	_, err = cli.MemberAdd(t.Context(), []string{newPURLs[0].String()})
+	require.NoError(t, err)
 
 	// wait for membership reconfiguration apply
 	time.Sleep(testutil.ApplyTimeout)
 
-	cfg := integration2.NewEmbedConfig(t, "3")
+	cfg := integration.NewEmbedConfig(t, "3")
 	cfg.InitialClusterToken = testClusterTkn
 	cfg.ClusterState = "existing"
-	cfg.LCUrls, cfg.ACUrls = newCURLs, newCURLs
-	cfg.LPUrls, cfg.APUrls = newPURLs, newPURLs
+	cfg.ListenClientUrls, cfg.AdvertiseClientUrls = newCURLs, newCURLs
+	cfg.ListenPeerUrls, cfg.AdvertisePeerUrls = newPURLs, newPURLs
 	cfg.InitialCluster = ""
 	for i := 0; i < clusterN; i++ {
 		cfg.InitialCluster += fmt.Sprintf(",%d=%s", i, pURLs[i].String())
@@ -76,9 +75,7 @@ func TestSnapshotV3RestoreMultiMemberAdd(t *testing.T) {
 	cfg.InitialCluster += fmt.Sprintf(",%s=%s", cfg.Name, newPURLs[0].String())
 
 	srv, err := embed.StartEtcd(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() {
 		srv.Close()
 	}()
@@ -88,36 +85,24 @@ func TestSnapshotV3RestoreMultiMemberAdd(t *testing.T) {
 		t.Fatalf("failed to start the newly added etcd member")
 	}
 
-	cli2, err := integration2.NewClient(t, clientv3.Config{Endpoints: []string{newCURLs[0].String()}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli2, err := integration.NewClient(t, clientv3.Config{Endpoints: []string{newCURLs[0].String()}})
+	require.NoError(t, err)
 	defer cli2.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.RequestTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), testutil.RequestTimeout)
 	mresp, err := cli2.MemberList(ctx)
 	cancel()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(mresp.Members) != 4 {
-		t.Fatalf("expected 4 members, got %+v", mresp)
-	}
+	require.NoError(t, err)
+	require.Lenf(t, mresp.Members, 4, "expected 4 members, got %+v", mresp)
 
 	// make sure restored cluster has kept all data on recovery
 	var gresp *clientv3.GetResponse
-	ctx, cancel = context.WithTimeout(context.Background(), testutil.RequestTimeout)
+	ctx, cancel = context.WithTimeout(t.Context(), testutil.RequestTimeout)
 	gresp, err = cli2.Get(ctx, "foo", clientv3.WithPrefix())
 	cancel()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	for i := range gresp.Kvs {
-		if string(gresp.Kvs[i].Key) != kvs[i].k {
-			t.Fatalf("#%d: key expected %s, got %s", i, kvs[i].k, string(gresp.Kvs[i].Key))
-		}
-		if string(gresp.Kvs[i].Value) != kvs[i].v {
-			t.Fatalf("#%d: value expected %s, got %s", i, kvs[i].v, string(gresp.Kvs[i].Value))
-		}
+		require.Equalf(t, string(gresp.Kvs[i].Key), kvs[i].k, "#%d: key expected %s, got %s", i, kvs[i].k, gresp.Kvs[i].Key)
+		require.Equalf(t, string(gresp.Kvs[i].Value), kvs[i].v, "#%d: value expected %s, got %s", i, kvs[i].v, gresp.Kvs[i].Value)
 	}
 }

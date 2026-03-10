@@ -24,10 +24,11 @@ import (
 	"testing"
 	"time"
 
-	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/raft/v3/raftpb"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
 	"go.uber.org/zap/zaptest"
+
+	"go.etcd.io/etcd/client/pkg/v3/types"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 type strReaderCloser struct{ *strings.Reader }
@@ -45,7 +46,7 @@ func TestSnapshotSend(t *testing.T) {
 	}{
 		// sent and receive with no errors
 		{
-			m:    raftpb.Message{Type: raftpb.MsgSnap, To: 1},
+			m:    raftpb.Message{Type: raftpb.MsgSnap, To: 1, Snapshot: &raftpb.Snapshot{}},
 			rc:   strReaderCloser{strings.NewReader("hello")},
 			size: 5,
 
@@ -54,7 +55,7 @@ func TestSnapshotSend(t *testing.T) {
 		},
 		// error when reading snapshot for send
 		{
-			m:    raftpb.Message{Type: raftpb.MsgSnap, To: 1},
+			m:    raftpb.Message{Type: raftpb.MsgSnap, To: 1, Snapshot: &raftpb.Snapshot{}},
 			rc:   &errReadCloser{fmt.Errorf("snapshot error")},
 			size: 1,
 
@@ -63,7 +64,7 @@ func TestSnapshotSend(t *testing.T) {
 		},
 		// sends less than the given snapshot length
 		{
-			m:    raftpb.Message{Type: raftpb.MsgSnap, To: 1},
+			m:    raftpb.Message{Type: raftpb.MsgSnap, To: 1, Snapshot: &raftpb.Snapshot{}},
 			rc:   strReaderCloser{strings.NewReader("hello")},
 			size: 10000,
 
@@ -72,7 +73,7 @@ func TestSnapshotSend(t *testing.T) {
 		},
 		// sends less than actual snapshot length
 		{
-			m:    raftpb.Message{Type: raftpb.MsgSnap, To: 1},
+			m:    raftpb.Message{Type: raftpb.MsgSnap, To: 1, Snapshot: &raftpb.Snapshot{}},
 			rc:   strReaderCloser{strings.NewReader("hello")},
 			size: 1,
 

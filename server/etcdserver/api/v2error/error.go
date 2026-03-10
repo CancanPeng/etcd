@@ -27,7 +27,7 @@ import (
 var errors = map[int]string{
 	// command related errors
 	EcodeKeyNotFound:      "Key not found",
-	EcodeTestFailed:       "Compare failed", //test and set
+	EcodeTestFailed:       "Compare failed", // test and set
 	EcodeNotFile:          "Not a file",
 	ecodeNoMorePeer:       "Reached the max number of peers in the cluster",
 	EcodeNotDir:           "Not a directory",
@@ -139,7 +139,7 @@ func (e Error) Error() string {
 	return e.Message + " (" + e.Cause + ")"
 }
 
-func (e Error) toJsonString() string {
+func (e Error) toJSONString() string {
 	b, _ := json.Marshal(e)
 	return string(b)
 }
@@ -156,6 +156,6 @@ func (e Error) WriteTo(w http.ResponseWriter) error {
 	w.Header().Add("X-Etcd-Index", fmt.Sprint(e.Index))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.StatusCode())
-	_, err := w.Write([]byte(e.toJsonString() + "\n"))
+	_, err := w.Write([]byte(e.toJSONString() + "\n"))
 	return err
 }

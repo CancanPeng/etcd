@@ -17,7 +17,9 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"sort"
 	"strings"
@@ -25,22 +27,21 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.etcd.io/etcd/api/v3/authpb"
-	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
+
+	"go.etcd.io/etcd/api/v3/authpb"
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 )
 
-var (
-	authEnabled  = []byte{1}
-	authDisabled = []byte{0}
+var _ AuthStore = (*authStore)(nil)
 
-	rootPerm = authpb.Permission{PermType: authpb.READWRITE, Key: []byte{}, RangeEnd: []byte{0}}
+var (
+	rootPerm = authpb.Permission{PermType: authpb.Permission_READWRITE, Key: []byte{}, RangeEnd: []byte{0}}
 
 	ErrRootUserNotExist     = errors.New("auth: root user does not exist")
 	ErrRootRoleNotExist     = errors.New("auth: root user does not have root role")
@@ -205,25 +206,39 @@ type AuthBackend interface {
 	GetAllRoles() []*authpb.Role
 }
 
-type AuthBatchTx interface {
-	AuthReadTx
-	UnsafeSaveAuthEnabled(enabled bool)
-	UnsafeSaveAuthRevision(rev uint64)
-	UnsafePutUser(*authpb.User)
-	UnsafeDeleteUser(string)
-	UnsafePutRole(*authpb.Role)
-	UnsafeDeleteRole(string)
+type AuthReadTx interface {
+	RLock()
+	RUnlock()
+	UnsafeAuthReader
 }
 
-type AuthReadTx interface {
+type UnsafeAuthReader interface {
 	UnsafeReadAuthEnabled() bool
 	UnsafeReadAuthRevision() uint64
 	UnsafeGetUser(string) *authpb.User
 	UnsafeGetRole(string) *authpb.Role
 	UnsafeGetAllUsers() []*authpb.User
 	UnsafeGetAllRoles() []*authpb.Role
+}
+
+type AuthBatchTx interface {
 	Lock()
 	Unlock()
+	UnsafeAuthReadWriter
+}
+
+type UnsafeAuthReadWriter interface {
+	UnsafeAuthReader
+	UnsafeAuthWriter
+}
+
+type UnsafeAuthWriter interface {
+	UnsafeSaveAuthEnabled(enabled bool)
+	UnsafeSaveAuthRevision(rev uint64)
+	UnsafePutUser(*authpb.User)
+	UnsafeDeleteUser(string)
+	UnsafePutRole(*authpb.Role)
+	UnsafeDeleteRole(string)
 }
 
 type authStore struct {
@@ -235,7 +250,14 @@ type authStore struct {
 	enabled   bool
 	enabledMu sync.RWMutex
 
-	rangePermCache map[string]*unifiedRangePermissions // username -> unifiedRangePermissions
+	// rangePermCache needs to be protected by rangePermCacheMu
+	// rangePermCacheMu needs to be write locked only in initialization phase or configuration changes
+	// Hot paths like Range(), needs to acquire read lock for improving performance
+	//
+	// Note that BatchTx and ReadTx cannot be a mutex for rangePermCache because they are independent resources
+	// see also: https://github.com/etcd-io/etcd/pull/13920#discussion_r849114855
+	rangePermCache   map[string]*unifiedRangePermissions // username -> unifiedRangePermissions
+	rangePermCacheMu sync.RWMutex
 
 	tokenProvider TokenProvider
 	bcryptCost    int // the algorithm cost / strength for hashing auth passwords
@@ -268,7 +290,7 @@ func (as *authStore) AuthEnable() error {
 	as.enabled = true
 	as.tokenProvider.enable()
 
-	as.rangePermCache = make(map[string]*unifiedRangePermissions)
+	as.refreshRangePermCache(tx)
 
 	as.setRevision(tx.UnsafeReadAuthRevision())
 
@@ -329,11 +351,10 @@ func (as *authStore) Authenticate(ctx context.Context, username, password string
 		return nil, err
 	}
 
-	as.lg.Debug(
-		"authenticated a user",
-		zap.String("user-name", username),
-		zap.String("token", token),
-	)
+	if ce := as.lg.Check(zap.DebugLevel, "authenticated a user"); ce != nil {
+		tokenFingerprint := redactToken(token)
+		ce.Write(zap.String("user-name", username), zap.String("token-fingerprint", tokenFingerprint))
+	}
 	return &pb.AuthenticateResponse{Token: token}, nil
 }
 
@@ -347,8 +368,8 @@ func (as *authStore) CheckPassword(username, password string) (uint64, error) {
 	// to avoid putting it in the critical section of the tx lock.
 	revision, err := func() (uint64, error) {
 		tx := as.be.ReadTx()
-		tx.Lock()
-		defer tx.Unlock()
+		tx.RLock()
+		defer tx.RUnlock()
 
 		user = tx.UnsafeGetUser(username)
 		if user == nil {
@@ -375,12 +396,13 @@ func (as *authStore) CheckPassword(username, password string) (uint64, error) {
 func (as *authStore) Recover(be AuthBackend) {
 	as.be = be
 	tx := be.ReadTx()
-	tx.Lock()
+	tx.RLock()
 
 	enabled := tx.UnsafeReadAuthEnabled()
 	as.setRevision(tx.UnsafeReadAuthRevision())
+	as.refreshRangePermCache(tx)
 
-	tx.Unlock()
+	tx.RUnlock()
 
 	as.enabledMu.Lock()
 	as.enabled = enabled
@@ -437,6 +459,7 @@ func (as *authStore) UserAdd(r *pb.AuthUserAddRequest) (*pb.AuthUserAddResponse,
 	tx.UnsafePutUser(newUser)
 
 	as.commitRevision(tx)
+	as.refreshRangePermCache(tx)
 
 	as.lg.Info("added a user", zap.String("user-name", r.Name))
 	return &pb.AuthUserAddResponse{}, nil
@@ -459,8 +482,8 @@ func (as *authStore) UserDelete(r *pb.AuthUserDeleteRequest) (*pb.AuthUserDelete
 	tx.UnsafeDeleteUser(r.Name)
 
 	as.commitRevision(tx)
+	as.refreshRangePermCache(tx)
 
-	as.invalidateCachedPerm(r.Name)
 	as.tokenProvider.invalidateUser(r.Name)
 
 	as.lg.Info(
@@ -484,7 +507,8 @@ func (as *authStore) UserChangePassword(r *pb.AuthUserChangePasswordRequest) (*p
 	var password []byte
 	var err error
 
-	if !user.Options.NoPassword {
+	// Backward compatible with old versions of etcd, user options is nil
+	if user.Options == nil || !user.Options.NoPassword {
 		password, err = as.selectPassword(r.Password, r.HashedPassword)
 		if err != nil {
 			return nil, ErrNoPasswordUser
@@ -500,8 +524,8 @@ func (as *authStore) UserChangePassword(r *pb.AuthUserChangePasswordRequest) (*p
 	tx.UnsafePutUser(updatedUser)
 
 	as.commitRevision(tx)
+	as.refreshRangePermCache(tx)
 
-	as.invalidateCachedPerm(r.Name)
 	as.tokenProvider.invalidateUser(r.Name)
 
 	as.lg.Info(
@@ -545,9 +569,8 @@ func (as *authStore) UserGrantRole(r *pb.AuthUserGrantRoleRequest) (*pb.AuthUser
 
 	tx.UnsafePutUser(user)
 
-	as.invalidateCachedPerm(r.User)
-
 	as.commitRevision(tx)
+	as.refreshRangePermCache(tx)
 
 	as.lg.Info(
 		"granted a role to a user",
@@ -617,9 +640,8 @@ func (as *authStore) UserRevokeRole(r *pb.AuthUserRevokeRoleRequest) (*pb.AuthUs
 
 	tx.UnsafePutUser(updatedUser)
 
-	as.invalidateCachedPerm(r.Name)
-
 	as.commitRevision(tx)
+	as.refreshRangePermCache(tx)
 
 	as.lg.Info(
 		"revoked a role from a user",
@@ -682,11 +704,8 @@ func (as *authStore) RoleRevokePermission(r *pb.AuthRoleRevokePermissionRequest)
 
 	tx.UnsafePutRole(updatedRole)
 
-	// TODO(mitake): currently single role update invalidates every cache
-	// It should be optimized.
-	as.clearCachedPerm()
-
 	as.commitRevision(tx)
+	as.refreshRangePermCache(tx)
 
 	as.lg.Info(
 		"revoked a permission on range",
@@ -733,11 +752,10 @@ func (as *authStore) RoleDelete(r *pb.AuthRoleDeleteRequest) (*pb.AuthRoleDelete
 		}
 
 		tx.UnsafePutUser(updatedUser)
-
-		as.invalidateCachedPerm(string(user.Name))
 	}
 
 	as.commitRevision(tx)
+	as.refreshRangePermCache(tx)
 
 	as.lg.Info("deleted a role", zap.String("role-name", r.Role))
 	return &pb.AuthRoleDeleteResponse{}, nil
@@ -791,6 +809,9 @@ func (as *authStore) RoleGrantPermission(r *pb.AuthRoleGrantPermissionRequest) (
 	if r.Perm == nil {
 		return nil, ErrPermissionNotGiven
 	}
+	if !isValidPermissionRange(r.Perm.Key, r.Perm.RangeEnd) {
+		return nil, ErrInvalidAuthMgmt
+	}
 
 	tx := as.be.BatchTx()
 	tx.Lock()
@@ -822,16 +843,15 @@ func (as *authStore) RoleGrantPermission(r *pb.AuthRoleGrantPermissionRequest) (
 
 	tx.UnsafePutRole(role)
 
-	// TODO(mitake): currently single role update invalidates every cache
-	// It should be optimized.
-	as.clearCachedPerm()
-
 	as.commitRevision(tx)
+	as.refreshRangePermCache(tx)
 
 	as.lg.Info(
 		"granted/updated a permission to a user",
 		zap.String("user-name", r.Name),
 		zap.String("permission-name", authpb.Permission_Type_name[int32(r.Perm.PermType)]),
+		zap.ByteString("key", r.Perm.Key),
+		zap.ByteString("range-end", r.Perm.RangeEnd),
 	)
 	return &pb.AuthRoleGrantPermissionResponse{}, nil
 }
@@ -857,8 +877,8 @@ func (as *authStore) isOpPermitted(userName string, revision uint64, key, rangeE
 	}
 
 	tx := as.be.ReadTx()
-	tx.Lock()
-	defer tx.Unlock()
+	tx.RLock()
+	defer tx.RUnlock()
 
 	user := tx.UnsafeGetUser(userName)
 	if user == nil {
@@ -871,7 +891,7 @@ func (as *authStore) isOpPermitted(userName string, revision uint64, key, rangeE
 		return nil
 	}
 
-	if as.isRangeOpPermitted(tx, userName, key, rangeEnd, permTyp) {
+	if as.isRangeOpPermitted(userName, key, rangeEnd, permTyp) {
 		return nil
 	}
 
@@ -879,15 +899,15 @@ func (as *authStore) isOpPermitted(userName string, revision uint64, key, rangeE
 }
 
 func (as *authStore) IsPutPermitted(authInfo *AuthInfo, key []byte) error {
-	return as.isOpPermitted(authInfo.Username, authInfo.Revision, key, nil, authpb.WRITE)
+	return as.isOpPermitted(authInfo.Username, authInfo.Revision, key, nil, authpb.Permission_WRITE)
 }
 
 func (as *authStore) IsRangePermitted(authInfo *AuthInfo, key, rangeEnd []byte) error {
-	return as.isOpPermitted(authInfo.Username, authInfo.Revision, key, rangeEnd, authpb.READ)
+	return as.isOpPermitted(authInfo.Username, authInfo.Revision, key, rangeEnd, authpb.Permission_READ)
 }
 
 func (as *authStore) IsDeleteRangePermitted(authInfo *AuthInfo, key, rangeEnd []byte) error {
-	return as.isOpPermitted(authInfo.Username, authInfo.Revision, key, rangeEnd, authpb.WRITE)
+	return as.isOpPermitted(authInfo.Username, authInfo.Revision, key, rangeEnd, authpb.Permission_WRITE)
 }
 
 func (as *authStore) IsAdminPermitted(authInfo *AuthInfo) error {
@@ -899,8 +919,8 @@ func (as *authStore) IsAdminPermitted(authInfo *AuthInfo) error {
 	}
 
 	tx := as.be.ReadTx()
-	tx.Lock()
-	defer tx.Unlock()
+	tx.RLock()
+	defer tx.RUnlock()
 	u := tx.UnsafeGetUser(authInfo.Username)
 
 	if u == nil {
@@ -921,7 +941,7 @@ func (as *authStore) IsAuthEnabled() bool {
 }
 
 // NewAuthStore creates a new AuthStore.
-func NewAuthStore(lg *zap.Logger, be AuthBackend, tp TokenProvider, bcryptCost int) *authStore {
+func NewAuthStore(lg *zap.Logger, be AuthBackend, tp TokenProvider, bcryptCost int) AuthStore {
 	if lg == nil {
 		lg = zap.NewNop()
 	}
@@ -963,6 +983,8 @@ func NewAuthStore(lg *zap.Logger, be AuthBackend, tp TokenProvider, bcryptCost i
 
 	as.setupMetricsReporter()
 
+	as.refreshRangePermCache(tx)
+
 	tx.Unlock()
 	be.ForceCommit()
 
@@ -975,7 +997,7 @@ func hasRootRole(u *authpb.User) bool {
 	return idx != len(u.Roles) && u.Roles[idx] == rootRole
 }
 
-func (as *authStore) commitRevision(tx AuthBatchTx) {
+func (as *authStore) commitRevision(tx UnsafeAuthWriter) {
 	atomic.AddUint64(&as.revision, 1)
 	tx.UnsafeSaveAuthRevision(as.Revision())
 }
@@ -1041,7 +1063,7 @@ func (as *authStore) AuthInfoFromCtx(ctx context.Context) (*AuthInfo, error) {
 		return nil, nil
 	}
 
-	//TODO(mitake|hexfusion) review unifying key names
+	// TODO(mitake|hexfusion) review unifying key names
 	ts, ok := md[rpctypes.TokenFieldNameGRPC]
 	if !ok {
 		ts, ok = md[rpctypes.TokenFieldNameSwagger]
@@ -1053,7 +1075,8 @@ func (as *authStore) AuthInfoFromCtx(ctx context.Context) (*AuthInfo, error) {
 	token := ts[0]
 	authInfo, uok := as.authInfoFromToken(ctx, token)
 	if !uok {
-		as.lg.Warn("invalid auth token", zap.String("token", token))
+		tokenFingerprint := redactToken(token)
+		as.lg.Warn("invalid auth token", zap.String("token-fingerprint", tokenFingerprint))
 		return nil, ErrInvalidAuthToken
 	}
 
@@ -1094,7 +1117,6 @@ func decomposeOpts(lg *zap.Logger, optstr string) (string, map[string]string, er
 	}
 
 	return tokenType, typeSpecificOpts, nil
-
 }
 
 // NewTokenProvider creates a new token provider.
@@ -1102,7 +1124,8 @@ func NewTokenProvider(
 	lg *zap.Logger,
 	tokenOpts string,
 	indexWaiter func(uint64) <-chan struct{},
-	TokenTTL time.Duration) (TokenProvider, error) {
+	TokenTTL time.Duration,
+) (TokenProvider, error) {
 	tokenType, typeSpecificOpts, err := decomposeOpts(lg, tokenOpts)
 	if err != nil {
 		return nil, ErrInvalidAuthOpts
@@ -1206,4 +1229,9 @@ func (as *authStore) setupMetricsReporter() {
 		return float64(as.Revision())
 	}
 	reportCurrentAuthRevMu.Unlock()
+}
+
+func redactToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])[:12]
 }

@@ -22,17 +22,19 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap/zaptest"
+
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/pkg/v3/pbutil"
-	"go.etcd.io/etcd/raft/v3"
-	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
 	"go.etcd.io/etcd/server/v3/mock/mockstorage"
 	serverstorage "go.etcd.io/etcd/server/v3/storage"
-	"go.uber.org/zap/zaptest"
+	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 func TestGetIDs(t *testing.T) {
+	lg := zaptest.NewLogger(t)
 	addcc := &raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: 2}
 	addEntry := raftpb.Entry{Type: raftpb.EntryConfChange, Data: pbutil.MustMarshal(addcc)}
 	removecc := &raftpb.ConfChange{Type: raftpb.ConfChangeRemoveNode, NodeID: 2}
@@ -48,18 +50,36 @@ func TestGetIDs(t *testing.T) {
 		widSet []uint64
 	}{
 		{nil, []raftpb.Entry{}, []uint64{}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{}, []uint64{1}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{addEntry}, []uint64{1, 2}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{addEntry, removeEntry}, []uint64{1}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{addEntry, normalEntry}, []uint64{1, 2}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{addEntry, normalEntry, updateEntry}, []uint64{1, 2}},
-		{&raftpb.ConfState{Voters: []uint64{1}},
-			[]raftpb.Entry{addEntry, removeEntry, normalEntry}, []uint64{1}},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{},
+			[]uint64{1},
+		},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{addEntry},
+			[]uint64{1, 2},
+		},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{addEntry, removeEntry},
+			[]uint64{1},
+		},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{addEntry, normalEntry},
+			[]uint64{1, 2},
+		},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{addEntry, normalEntry, updateEntry},
+			[]uint64{1, 2},
+		},
+		{
+			&raftpb.ConfState{Voters: []uint64{1}},
+			[]raftpb.Entry{addEntry, removeEntry, normalEntry},
+			[]uint64{1},
+		},
 	}
 
 	for i, tt := range tests {
@@ -67,7 +87,7 @@ func TestGetIDs(t *testing.T) {
 		if tt.confState != nil {
 			snap.Metadata.ConfState = *tt.confState
 		}
-		idSet := serverstorage.GetEffectiveNodeIDsFromWalEntries(zaptest.NewLogger(t), &snap, tt.ents)
+		idSet := serverstorage.GetEffectiveNodeIDsFromWALEntries(lg, &snap, tt.ents)
 		if !reflect.DeepEqual(idSet, tt.widSet) {
 			t.Errorf("#%d: idset = %#v, want %#v", i, idSet, tt.widSet)
 		}
@@ -75,6 +95,7 @@ func TestGetIDs(t *testing.T) {
 }
 
 func TestCreateConfigChangeEnts(t *testing.T) {
+	lg := zaptest.NewLogger(t)
 	m := membership.Member{
 		ID:             types.ID(1),
 		RaftAttributes: membership.RaftAttributes{PeerURLs: []string{"http://localhost:2380"}},
@@ -147,7 +168,7 @@ func TestCreateConfigChangeEnts(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		gents := serverstorage.CreateConfigChangeEnts(zaptest.NewLogger(t), tt.ids, tt.self, tt.term, tt.index)
+		gents := serverstorage.CreateConfigChangeEnts(lg, tt.ids, tt.self, tt.term, tt.index)
 		if !reflect.DeepEqual(gents, tt.wents) {
 			t.Errorf("#%d: ents = %v, want %v", i, gents, tt.wents)
 		}
@@ -166,21 +187,27 @@ func TestStopRaftWhenWaitingForApplyDone(t *testing.T) {
 	srv := &EtcdServer{lgMu: new(sync.RWMutex), lg: zaptest.NewLogger(t), r: *r}
 	srv.r.start(nil)
 	n.readyc <- raft.Ready{}
+
+	stop := func() {
+		srv.r.stopped <- struct{}{}
+		select {
+		case <-srv.r.done:
+		case <-time.After(time.Second):
+			t.Fatalf("failed to stop raft loop")
+		}
+	}
+
 	select {
 	case <-srv.r.applyc:
 	case <-time.After(time.Second):
-		t.Fatalf("failed to receive apply struct")
+		stop()
+		t.Fatalf("failed to receive toApply struct")
 	}
 
-	srv.r.stopped <- struct{}{}
-	select {
-	case <-srv.r.done:
-	case <-time.After(time.Second):
-		t.Fatalf("failed to stop raft loop")
-	}
+	stop()
 }
 
-// TestConfigChangeBlocksApply ensures apply blocks if committed entries contain config-change.
+// TestConfigChangeBlocksApply ensures toApply blocks if committed entries contain config-change.
 func TestConfigChangeBlocksApply(t *testing.T) {
 	n := newNopReadyNode()
 
@@ -198,7 +225,7 @@ func TestConfigChangeBlocksApply(t *testing.T) {
 		updateLead:       func(uint64) {},
 		updateLeadership: func(bool) {},
 	})
-	defer srv.r.Stop()
+	defer srv.r.stop()
 
 	n.readyc <- raft.Ready{
 		SoftState:        &raft.SoftState{RaftState: raft.StateFollower},
@@ -215,12 +242,17 @@ func TestConfigChangeBlocksApply(t *testing.T) {
 
 	select {
 	case <-continueC:
-		t.Fatalf("unexpected execution: raft routine should block waiting for apply")
+		t.Fatalf("unexpected execution: raft routine should block waiting for toApply")
 	case <-time.After(time.Second):
 	}
 
-	// finish apply, unblock raft routine
+	// finish toApply, unblock raft routine
 	<-ap.notifyc
+
+	select {
+	case <-ap.raftAdvancedC:
+		t.Log("recevied raft advance notification")
+	}
 
 	select {
 	case <-continueC:
@@ -246,11 +278,10 @@ func TestProcessDuplicatedAppRespMessage(t *testing.T) {
 	})
 
 	s := &EtcdServer{
-		lgMu:       new(sync.RWMutex),
-		lg:         zaptest.NewLogger(t),
-		r:          *r,
-		cluster:    cl,
-		SyncTicker: &time.Ticker{},
+		lgMu:    new(sync.RWMutex),
+		lg:      zaptest.NewLogger(t),
+		r:       *r,
+		cluster: cl,
 	}
 
 	s.start()
@@ -270,9 +301,8 @@ func TestProcessDuplicatedAppRespMessage(t *testing.T) {
 	}
 }
 
-// Test that none of the expvars that get added during init panic.
-// This matters if another package imports etcdserver,
-// doesn't use it, but does use expvars.
+// TestExpvarWithNoRaftStatus to test that none of the expvars that get added during init panic.
+// This matters if another package imports etcdserver, doesn't use it, but does use expvars.
 func TestExpvarWithNoRaftStatus(t *testing.T) {
 	defer func() {
 		if err := recover(); err != nil {
@@ -282,4 +312,30 @@ func TestExpvarWithNoRaftStatus(t *testing.T) {
 	expvar.Do(func(kv expvar.KeyValue) {
 		_ = kv.Value.String()
 	})
+}
+
+func TestStopRaftNodeMoreThanOnce(t *testing.T) {
+	n := newNopReadyNode()
+	r := newRaftNode(raftNodeConfig{
+		lg:          zaptest.NewLogger(t),
+		Node:        n,
+		storage:     mockstorage.NewStorageRecorder(""),
+		raftStorage: raft.NewMemoryStorage(),
+		transport:   newNopTransporter(),
+	})
+	r.start(&raftReadyHandler{})
+
+	for i := 0; i < 2; i++ {
+		stopped := make(chan struct{})
+		go func() {
+			r.stop()
+			close(stopped)
+		}()
+
+		select {
+		case <-stopped:
+		case <-time.After(time.Second):
+			t.Errorf("*raftNode.stop() is blocked !")
+		}
+	}
 }

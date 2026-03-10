@@ -15,17 +15,26 @@
 package schema
 
 import (
+	"go.uber.org/zap"
+
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/server/v3/storage/backend"
-	"go.uber.org/zap"
 )
+
+type AlarmBackend interface {
+	CreateAlarmBucket()
+	MustPutAlarm(member *etcdserverpb.AlarmMember)
+	MustDeleteAlarm(alarm *etcdserverpb.AlarmMember)
+	GetAllAlarms() ([]*etcdserverpb.AlarmMember, error)
+	ForceCommit()
+}
 
 type alarmBackend struct {
 	lg *zap.Logger
 	be backend.Backend
 }
 
-func NewAlarmBackend(lg *zap.Logger, be backend.Backend) *alarmBackend {
+func NewAlarmBackend(lg *zap.Logger, be backend.Backend) AlarmBackend {
 	return &alarmBackend{
 		lg: lg,
 		be: be,
@@ -46,7 +55,7 @@ func (s *alarmBackend) MustPutAlarm(alarm *etcdserverpb.AlarmMember) {
 	s.mustUnsafePutAlarm(tx, alarm)
 }
 
-func (s *alarmBackend) mustUnsafePutAlarm(tx backend.BatchTx, alarm *etcdserverpb.AlarmMember) {
+func (s *alarmBackend) mustUnsafePutAlarm(tx backend.UnsafeWriter, alarm *etcdserverpb.AlarmMember) {
 	v, err := alarm.Marshal()
 	if err != nil {
 		s.lg.Panic("failed to marshal alarm member", zap.Error(err))
@@ -62,7 +71,7 @@ func (s *alarmBackend) MustDeleteAlarm(alarm *etcdserverpb.AlarmMember) {
 	s.mustUnsafeDeleteAlarm(tx, alarm)
 }
 
-func (s *alarmBackend) mustUnsafeDeleteAlarm(tx backend.BatchTx, alarm *etcdserverpb.AlarmMember) {
+func (s *alarmBackend) mustUnsafeDeleteAlarm(tx backend.UnsafeWriter, alarm *etcdserverpb.AlarmMember) {
 	v, err := alarm.Marshal()
 	if err != nil {
 		s.lg.Panic("failed to marshal alarm member", zap.Error(err))
@@ -73,13 +82,13 @@ func (s *alarmBackend) mustUnsafeDeleteAlarm(tx backend.BatchTx, alarm *etcdserv
 
 func (s *alarmBackend) GetAllAlarms() ([]*etcdserverpb.AlarmMember, error) {
 	tx := s.be.ReadTx()
-	tx.Lock()
-	defer tx.Unlock()
+	tx.RLock()
+	defer tx.RUnlock()
 	return s.unsafeGetAllAlarms(tx)
 }
 
-func (s *alarmBackend) unsafeGetAllAlarms(tx backend.ReadTx) ([]*etcdserverpb.AlarmMember, error) {
-	ms := []*etcdserverpb.AlarmMember{}
+func (s *alarmBackend) unsafeGetAllAlarms(tx backend.UnsafeReader) ([]*etcdserverpb.AlarmMember, error) {
+	var ms []*etcdserverpb.AlarmMember
 	err := tx.UnsafeForEach(Alarm, func(k, v []byte) error {
 		var m etcdserverpb.AlarmMember
 		if err := m.Unmarshal(k); err != nil {

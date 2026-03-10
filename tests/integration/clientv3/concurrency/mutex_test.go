@@ -15,58 +15,76 @@
 package concurrency_test
 
 import (
-	"context"
+	"errors"
 	"testing"
 
-	"go.etcd.io/etcd/client/v3"
+	"github.com/stretchr/testify/require"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 func TestMutexLockSessionExpired(t *testing.T) {
-	cli, err := integration2.NewClient(t, clientv3.Config{Endpoints: exampleEndpoints()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	cli, err := integration.NewClient(t, clientv3.Config{Endpoints: exampleEndpoints()})
+	require.NoError(t, err)
 	defer cli.Close()
 
 	// create two separate sessions for lock competition
 	s1, err := concurrency.NewSession(cli)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer s1.Close()
 	m1 := concurrency.NewMutex(s1, "/my-lock/")
 
 	s2, err := concurrency.NewSession(cli)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	m2 := concurrency.NewMutex(s2, "/my-lock/")
 
 	// acquire lock for s1
-	if err := m1.Lock(context.TODO()); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, m1.Lock(t.Context()))
 
 	m2Locked := make(chan struct{})
 	var err2 error
 	go func() {
 		defer close(m2Locked)
 		// m2 blocks since m1 already acquired lock /my-lock/
-		if err2 = m2.Lock(context.TODO()); err2 == nil {
+		if err2 = m2.Lock(t.Context()); err2 == nil {
 			t.Error("expect session expired error")
 		}
 	}()
 
 	// revoke the session of m2 before unlock m1
-	err = s2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := m1.Unlock(context.TODO()); err != nil {
+	require.NoError(t, s2.Close())
+	require.NoError(t, m1.Unlock(t.Context()))
+
+	<-m2Locked
+}
+
+func TestMutexUnlock(t *testing.T) {
+	cli, err := integration.NewClient(t, clientv3.Config{Endpoints: exampleEndpoints()})
+	require.NoError(t, err)
+	defer cli.Close()
+
+	s1, err := concurrency.NewSession(cli)
+	require.NoError(t, err)
+	defer s1.Close()
+
+	m1 := concurrency.NewMutex(s1, "/my-lock/")
+	err = m1.Unlock(t.Context())
+	require.Errorf(t, err, "expect lock released error")
+	if !errors.Is(err, concurrency.ErrLockReleased) {
 		t.Fatal(err)
 	}
 
-	<-m2Locked
+	require.NoError(t, m1.Lock(t.Context()))
+
+	require.NoError(t, m1.Unlock(t.Context()))
+
+	err = m1.Unlock(t.Context())
+	if err == nil {
+		t.Fatal("expect lock released error")
+	}
+	if !errors.Is(err, concurrency.ErrLockReleased) {
+		t.Fatal(err)
+	}
 }

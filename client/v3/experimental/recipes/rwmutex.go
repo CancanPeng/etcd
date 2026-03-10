@@ -63,7 +63,7 @@ func (rwm *RWMutex) Lock() error {
 	}
 }
 
-// waitOnLowest will wait on the last key with a revision < rwm.myKey.Revision with a
+// waitOnLastRev will wait on the last key with a revision < rwm.myKey.Revision with a
 // given prefix. If there are no keys left to wait on, return true.
 func (rwm *RWMutex) waitOnLastRev(pfx string) (bool, error) {
 	client := rwm.s.Client()
@@ -81,7 +81,7 @@ func (rwm *RWMutex) waitOnLastRev(pfx string) (bool, error) {
 		client,
 		string(lastKey.Kvs[0].Key),
 		rwm.myKey.Revision(),
-		[]mvccpb.Event_EventType{mvccpb.DELETE})
+		[]mvccpb.Event_EventType{mvccpb.Event_DELETE})
 	return false, err
 }
 

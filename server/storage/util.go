@@ -23,10 +23,10 @@ import (
 
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/pkg/v3/pbutil"
-	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 // AssertNoV2StoreContent -> depending on the deprecation stage, warns or report an error
@@ -39,7 +39,7 @@ func AssertNoV2StoreContent(lg *zap.Logger, st v2store.Store, deprecationStage c
 	if metaOnly {
 		return nil
 	}
-	if deprecationStage.IsAtLeast(config.V2_DEPR_1_WRITE_ONLY) {
+	if deprecationStage.IsAtLeast(config.V2Depr1WriteOnly) {
 		return fmt.Errorf("detected disallowed custom content in v2store for stage --v2-deprecation=%s", deprecationStage)
 	}
 	lg.Warn("detected custom v2store content. Etcd v3.5 is the last version allowing to access it using API v2. Please remove the content.")
@@ -109,16 +109,19 @@ func CreateConfigChangeEnts(lg *zap.Logger, ids []uint64, self uint64, term, ind
 	return ents
 }
 
-// GetEffectiveNodeIDsFromWalEntries returns an ordered set of IDs included in the given snapshot and
+// GetEffectiveNodeIDsFromWALEntries returns an ordered set of IDs included in the given snapshot and
 // the entries. The given snapshot/entries can contain three kinds of
 // ID-related entry:
 // - ConfChangeAddNode, in which case the contained ID will Be added into the set.
 // - ConfChangeRemoveNode, in which case the contained ID will Be removed from the set.
 // - ConfChangeAddLearnerNode, in which the contained ID will Be added into the set.
-func GetEffectiveNodeIDsFromWalEntries(lg *zap.Logger, snap *raftpb.Snapshot, ents []raftpb.Entry) []uint64 {
+func GetEffectiveNodeIDsFromWALEntries(lg *zap.Logger, snap *raftpb.Snapshot, ents []raftpb.Entry) []uint64 {
 	ids := make(map[uint64]bool)
 	if snap != nil {
 		for _, id := range snap.Metadata.ConfState.Voters {
+			ids[id] = true
+		}
+		for _, id := range snap.Metadata.ConfState.Learners {
 			ids[id] = true
 		}
 	}
@@ -146,5 +149,5 @@ func GetEffectiveNodeIDsFromWalEntries(lg *zap.Logger, snap *raftpb.Snapshot, en
 		sids = append(sids, id)
 	}
 	sort.Sort(sids)
-	return []uint64(sids)
+	return sids
 }

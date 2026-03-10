@@ -24,6 +24,16 @@ type Dialer interface {
 	Dial() (net.Conn, error)
 }
 
+// Bridge interface exposing methods of the bridge
+type Bridge interface {
+	Close()
+	DropConnections()
+	PauseConnections()
+	UnpauseConnections()
+	Blackhole()
+	Unblackhole()
+}
+
 // bridge proxies connections between listener and dialer, making it possible
 // to disconnect grpc network connections without closing the logical grpc connection.
 type bridge struct {
@@ -39,7 +49,7 @@ type bridge struct {
 	mu sync.Mutex
 }
 
-func newBridge(dialer Dialer, listener net.Listener) (*bridge, error) {
+func newBridge(dialer Dialer, listener net.Listener) *bridge {
 	b := &bridge{
 		// bridge "port" is ("%05d%05d0", port, pid) since go1.8 expects the port to be a number
 		dialer:     dialer,
@@ -52,7 +62,7 @@ func newBridge(dialer Dialer, listener net.Listener) (*bridge, error) {
 	close(b.pausec)
 	b.wg.Add(1)
 	go b.serveListen()
-	return b, nil
+	return b
 }
 
 func (b *bridge) Close() {

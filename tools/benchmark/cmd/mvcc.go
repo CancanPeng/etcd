@@ -18,13 +18,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
 	"go.etcd.io/etcd/server/v3/lease"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	"go.etcd.io/etcd/server/v3/storage/mvcc"
-
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -59,6 +58,6 @@ func init() {
 	mvccCmd.PersistentFlags().IntVar(&batchLimit, "batch-limit", 10000, "A limit of batched transaction")
 }
 
-func mvccPreRun(cmd *cobra.Command, args []string) {
+func mvccPreRun(_ *cobra.Command, _ []string) {
 	initMVCC()
 }

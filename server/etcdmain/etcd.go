@@ -15,21 +15,21 @@
 package etcdmain
 
 import (
+	errorspkg "errors"
 	"fmt"
 	"os"
 	"runtime"
 	"strings"
+
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
 
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	"go.etcd.io/etcd/pkg/v3/osutil"
 	"go.etcd.io/etcd/server/v3/embed"
-	"go.etcd.io/etcd/server/v3/etcdserver"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v2discovery"
-
-	"go.uber.org/zap"
-	"google.golang.org/grpc"
+	"go.etcd.io/etcd/server/v3/etcdserver/errors"
 )
 
 type dirType string
@@ -63,8 +63,7 @@ func startEtcdOrProxyV2(args []string) {
 	lg.Info("Running: ", zap.Strings("args", args))
 	if err != nil {
 		lg.Warn("failed to verify flags", zap.Error(err))
-		switch err {
-		case embed.ErrUnsetAdvertiseClientURLsFlag:
+		if errorspkg.Is(err, embed.ErrUnsetAdvertiseClientURLsFlag) {
 			lg.Warn("advertise client URLs are not set", zap.Error(err))
 		}
 		os.Exit(1)
@@ -120,46 +119,25 @@ func startEtcdOrProxyV2(args []string) {
 			)
 		}
 	} else {
+		lg.Info(
+			"Initialize and start etcd server",
+			zap.String("data-dir", cfg.ec.Dir),
+			zap.String("dir-type", string(which)),
+		)
 		stopped, errc, err = startEtcd(&cfg.ec)
-		if err != nil {
-			lg.Warn("failed to start etcd", zap.Error(err))
-		}
 	}
 
 	if err != nil {
-		if derr, ok := err.(*etcdserver.DiscoveryError); ok {
-			switch derr.Err {
-			case v2discovery.ErrDuplicateID:
-				lg.Warn(
-					"member has been registered with discovery service",
-					zap.String("name", cfg.ec.Name),
-					zap.String("discovery-token", cfg.ec.Durl),
-					zap.Error(derr.Err),
-				)
-				lg.Warn(
-					"but could not find valid cluster configuration",
-					zap.String("data-dir", cfg.ec.Dir),
-				)
-				lg.Warn("check data dir if previous bootstrap succeeded")
-				lg.Warn("or use a new discovery token if previous bootstrap failed")
+		var derr *errors.DiscoveryError
+		if errorspkg.As(err, &derr) {
+			lg.Warn(
+				"failed to bootstrap; discovery token was already used",
+				zap.String("discovery-token", cfg.ec.DiscoveryCfg.Token),
+				zap.Strings("discovery-endpoints", cfg.ec.DiscoveryCfg.Endpoints),
+				zap.Error(err),
+			)
+			lg.Warn("do not reuse discovery token; generate a new one to bootstrap a cluster")
 
-			case v2discovery.ErrDuplicateName:
-				lg.Warn(
-					"member with duplicated name has already been registered",
-					zap.String("discovery-token", cfg.ec.Durl),
-					zap.Error(derr.Err),
-				)
-				lg.Warn("cURL the discovery token URL for details")
-				lg.Warn("do not reuse discovery token; generate a new one to bootstrap a cluster")
-
-			default:
-				lg.Warn(
-					"failed to bootstrap; discovery token was already used",
-					zap.String("discovery-token", cfg.ec.Durl),
-					zap.Error(err),
-				)
-				lg.Warn("do not reuse discovery token; generate a new one to bootstrap a cluster")
-			}
 			os.Exit(1)
 		}
 
@@ -168,11 +146,11 @@ func startEtcdOrProxyV2(args []string) {
 			if cfg.ec.InitialCluster == cfg.ec.InitialClusterFromName(cfg.ec.Name) {
 				lg.Warn("forgot to set --initial-cluster?")
 			}
-			if types.URLs(cfg.ec.APUrls).String() == embed.DefaultInitialAdvertisePeerURLs {
+			if types.URLs(cfg.ec.AdvertisePeerUrls).String() == embed.DefaultInitialAdvertisePeerURLs {
 				lg.Warn("forgot to set --initial-advertise-peer-urls?")
 			}
-			if cfg.ec.InitialCluster == cfg.ec.InitialClusterFromName(cfg.ec.Name) && len(cfg.ec.Durl) == 0 && len(cfg.ec.DiscoveryCfg.Endpoints) == 0 {
-				lg.Warn("V2 discovery settings (i.e., --discovery) or v3 discovery settings (i.e., --discovery-token, --discovery-endpoints) are not set")
+			if cfg.ec.InitialCluster == cfg.ec.InitialClusterFromName(cfg.ec.Name) && len(cfg.ec.DiscoveryCfg.Endpoints) == 0 {
+				lg.Warn("V3 discovery settings (i.e., --discovery-token, --discovery-endpoints) are not set")
 			}
 			os.Exit(1)
 		}
@@ -256,11 +234,10 @@ func checkSupportArch() {
 	if err != nil {
 		panic(err)
 	}
-	// to add a new platform, check https://github.com/etcd-io/website/blob/main/content/en/docs/next/op-guide/supported-platform.md
-	if runtime.GOARCH == "amd64" ||
-		runtime.GOARCH == "arm64" ||
-		runtime.GOARCH == "ppc64le" ||
-		runtime.GOARCH == "s390x" {
+	// To add a new platform, check https://github.com/etcd-io/website/blob/main/content/en/docs/${VERSION}/op-guide/supported-platform.md.
+	// The ${VERSION} is the etcd version, e.g. v3.5, v3.6 etc.
+	switch runtime.GOARCH {
+	case "amd64", "arm64", "ppc64le", "s390x":
 		return
 	}
 	// unsupported arch only configured via environment variable
@@ -271,6 +248,6 @@ func checkSupportArch() {
 		return
 	}
 
-	lg.Error("running etcd on unsupported architecture since ETCD_UNSUPPORTED_ARCH is set", zap.String("arch", runtime.GOARCH))
+	lg.Error("Refusing to run etcd on unsupported architecture since ETCD_UNSUPPORTED_ARCH is not set", zap.String("arch", runtime.GOARCH))
 	os.Exit(1)
 }

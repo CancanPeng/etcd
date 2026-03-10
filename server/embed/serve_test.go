@@ -20,6 +20,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/server/v3/auth"
 )
 
@@ -33,8 +35,8 @@ func TestStartEtcdWrongToken(t *testing.T) {
 	urls := newEmbedURLs(2)
 	curls := []url.URL{urls[0]}
 	purls := []url.URL{urls[1]}
-	cfg.LCUrls, cfg.ACUrls = curls, curls
-	cfg.LPUrls, cfg.APUrls = purls, purls
+	cfg.ListenClientUrls, cfg.AdvertiseClientUrls = curls, curls
+	cfg.ListenPeerUrls, cfg.AdvertisePeerUrls = purls, purls
 	cfg.InitialCluster = ""
 	for i := range purls {
 		cfg.InitialCluster += ",default=" + purls[i].String()
@@ -43,9 +45,8 @@ func TestStartEtcdWrongToken(t *testing.T) {
 	cfg.Dir = tdir
 	cfg.AuthToken = "wrong-token"
 
-	if _, err := StartEtcd(cfg); err != auth.ErrInvalidAuthOpts {
-		t.Fatalf("expected %v, got %v", auth.ErrInvalidAuthOpts, err)
-	}
+	_, err := StartEtcd(cfg)
+	require.ErrorIsf(t, err, auth.ErrInvalidAuthOpts, "expected %v, got %v", auth.ErrInvalidAuthOpts, err)
 }
 
 func newEmbedURLs(n int) (urls []url.URL) {

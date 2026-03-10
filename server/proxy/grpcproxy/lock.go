@@ -1,4 +1,4 @@
-// Copyright 2017 The etcd Lockors
+// Copyright 2017 The etcd Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,22 +17,24 @@ package grpcproxy
 import (
 	"context"
 
-	"go.etcd.io/etcd/client/v3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v3lock/v3lockpb"
 )
 
 type lockProxy struct {
-	client *clientv3.Client
+	lockClient v3lockpb.LockClient
+	// we want compile errors if new methods are added
+	v3lockpb.UnsafeLockServer
 }
 
 func NewLockProxy(client *clientv3.Client) v3lockpb.LockServer {
-	return &lockProxy{client: client}
+	return &lockProxy{lockClient: v3lockpb.NewLockClient(client.ActiveConnection())}
 }
 
 func (lp *lockProxy) Lock(ctx context.Context, req *v3lockpb.LockRequest) (*v3lockpb.LockResponse, error) {
-	return v3lockpb.NewLockClient(lp.client.ActiveConnection()).Lock(ctx, req)
+	return lp.lockClient.Lock(ctx, req)
 }
 
 func (lp *lockProxy) Unlock(ctx context.Context, req *v3lockpb.UnlockRequest) (*v3lockpb.UnlockResponse, error) {
-	return v3lockpb.NewLockClient(lp.client.ActiveConnection()).Unlock(ctx, req)
+	return lp.lockClient.Unlock(ctx, req)
 }

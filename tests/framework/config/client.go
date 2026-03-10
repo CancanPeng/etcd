@@ -20,21 +20,34 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
+// ClientOption configures the client with additional parameter.
+// For example, if Auth is enabled, the common test cases just need to
+// use `WithAuth` to return a ClientOption. Note that the common `WithAuth`
+// function calls `e2e.WithAuth` or `integration.WithAuth`, depending on the
+// build tag (either "e2e" or "integration").
+type ClientOption func(any)
+
 type GetOptions struct {
-	Revision     int
-	End          string
-	CountOnly    bool
-	Serializable bool
-	Prefix       bool
-	FromKey      bool
-	Limit        int
-	Order        clientv3.SortOrder
-	SortBy       clientv3.SortTarget
-	Timeout      time.Duration
+	Revision          int
+	End               string
+	CountOnly         bool
+	Serializable      bool
+	Prefix            bool
+	FromKey           bool
+	Limit             int
+	Order             clientv3.SortOrder
+	SortBy            clientv3.SortTarget
+	Timeout           time.Duration
+	KeysOnly          bool
+	MinModRevision    int
+	MaxModRevision    int
+	MinCreateRevision int
+	MaxCreateRevision int
 }
 
 type PutOptions struct {
 	LeaseID clientv3.LeaseID
+	Timeout time.Duration
 }
 
 type DeleteOptions struct {
@@ -62,4 +75,10 @@ type LeaseOption struct {
 
 type UserAddOptions struct {
 	NoPassword bool
+}
+
+type WatchOptions struct {
+	Prefix   bool
+	Revision int64
+	RangeEnd string
 }

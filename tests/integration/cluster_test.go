@@ -25,8 +25,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/etcdserver"
+	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
@@ -57,8 +60,9 @@ func TestTLSClusterOf3(t *testing.T) {
 	clusterMustProgress(t, c.Members)
 }
 
-// Test that a cluster can progress when using separate client and server certs when peering. This supports certificate
-// authorities that don't issue dual-usage certificates.
+// TestTLSClusterOf3WithSpecificUsage tests that a cluster can progress when
+// using separate client and server certs when peering. This supports
+// certificate authorities that don't issue dual-usage certificates.
 func TestTLSClusterOf3WithSpecificUsage(t *testing.T) {
 	integration.BeforeTest(t)
 	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, PeerTLS: &integration.TestTLSInfoWithSpecificUsage})
@@ -71,7 +75,7 @@ func TestDoubleClusterSizeOf3(t *testing.T) { testDoubleClusterSize(t, 3) }
 
 func testDoubleClusterSize(t *testing.T, size int) {
 	integration.BeforeTest(t)
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: size})
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: size, DisableStrictReconfigCheck: true})
 	defer c.Terminate(t)
 
 	for i := 0; i < size; i++ {
@@ -82,7 +86,12 @@ func testDoubleClusterSize(t *testing.T, size int) {
 
 func TestDoubleTLSClusterSizeOf3(t *testing.T) {
 	integration.BeforeTest(t)
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 1, PeerTLS: &integration.TestTLSInfo})
+	cfg := &integration.ClusterConfig{
+		Size:                       1,
+		PeerTLS:                    &integration.TestTLSInfo,
+		DisableStrictReconfigCheck: true,
+	}
+	c := integration.NewCluster(t, cfg)
 	defer c.Terminate(t)
 
 	for i := 0; i < 3; i++ {
@@ -96,12 +105,12 @@ func TestDecreaseClusterSizeOf5(t *testing.T) { testDecreaseClusterSize(t, 5) }
 
 func testDecreaseClusterSize(t *testing.T, size int) {
 	integration.BeforeTest(t)
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: size})
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: size, DisableStrictReconfigCheck: true})
 	defer c.Terminate(t)
 
 	// TODO: remove the last but one member
 	for i := 0; i < size-1; i++ {
-		id := c.Members[len(c.Members)-1].Server.ID()
+		id := c.Members[len(c.Members)-1].Server.MemberID()
 		// may hit second leader election on slow machines
 		if err := c.RemoveMember(t, c.Members[0].Client, uint64(id)); err != nil {
 			if strings.Contains(err.Error(), "no leader") {
@@ -121,25 +130,19 @@ func TestForceNewCluster(t *testing.T) {
 	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true})
 	defer c.Terminate(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), integration.RequestTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), integration.RequestTimeout)
 	resp, err := c.Members[0].Client.Put(ctx, "/foo", "bar")
-	if err != nil {
-		t.Fatalf("unexpected create error: %v", err)
-	}
+	require.NoErrorf(t, err, "unexpected create error")
 	cancel()
 	// ensure create has been applied in this machine
-	ctx, cancel = context.WithTimeout(context.Background(), integration.RequestTimeout)
+	ctx, cancel = context.WithTimeout(t.Context(), integration.RequestTimeout)
 	watch := c.Members[0].Client.Watcher.Watch(ctx, "/foo", clientv3.WithRev(resp.Header.Revision-1))
 	for resp := range watch {
 		if len(resp.Events) != 0 {
 			break
 		}
-		if resp.Err() != nil {
-			t.Fatalf("unexpected watch error: %q", resp.Err())
-		}
-		if resp.Canceled {
-			t.Fatalf("watch  cancelled")
-		}
+		require.NoErrorf(t, resp.Err(), "unexpected watch error")
+		require.Falsef(t, resp.Canceled, "watch  cancelled")
 	}
 	cancel()
 
@@ -148,25 +151,19 @@ func TestForceNewCluster(t *testing.T) {
 	c.Members[2].Terminate(t)
 	c.Members[0].ForceNewCluster = true
 	err = c.Members[0].Restart(t)
-	if err != nil {
-		t.Fatalf("unexpected ForceRestart error: %v", err)
-	}
+	require.NoErrorf(t, err, "unexpected ForceRestart error")
 	c.WaitMembersForLeader(t, c.Members[:1])
 
 	// use new http client to init new connection
 	// ensure force restart keep the old data, and new Cluster can make progress
-	ctx, cancel = context.WithTimeout(context.Background(), integration.RequestTimeout)
+	ctx, cancel = context.WithTimeout(t.Context(), integration.RequestTimeout)
 	watch = c.Members[0].Client.Watcher.Watch(ctx, "/foo", clientv3.WithRev(resp.Header.Revision-1))
 	for resp := range watch {
 		if len(resp.Events) != 0 {
 			break
 		}
-		if resp.Err() != nil {
-			t.Fatalf("unexpected watch error: %q", resp.Err())
-		}
-		if resp.Canceled {
-			t.Fatalf("watch  cancelled")
-		}
+		require.NoErrorf(t, resp.Err(), "unexpected watch error")
+		require.Falsef(t, resp.Canceled, "watch  cancelled")
 	}
 	cancel()
 	clusterMustProgress(t, c.Members[:1])
@@ -174,14 +171,13 @@ func TestForceNewCluster(t *testing.T) {
 
 func TestAddMemberAfterClusterFullRotation(t *testing.T) {
 	integration.BeforeTest(t)
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, DisableStrictReconfigCheck: true})
 	defer c.Terminate(t)
 
 	// remove all the previous three members and add in three new members.
 	for i := 0; i < 3; i++ {
-		if err := c.RemoveMember(t, c.Members[0].Client, uint64(c.Members[1].Server.ID())); err != nil {
-			t.Fatal(err)
-		}
+		err := c.RemoveMember(t, c.Members[0].Client, uint64(c.Members[1].Server.MemberID()))
+		require.NoError(t, err)
 		c.WaitMembersForLeader(t, c.Members)
 
 		c.AddMember(t)
@@ -194,15 +190,13 @@ func TestAddMemberAfterClusterFullRotation(t *testing.T) {
 	clusterMustProgress(t, c.Members)
 }
 
-// Ensure we can remove a member then add a new one back immediately.
+// TestIssue2681 ensures we can remove a member then add a new one back immediately.
 func TestIssue2681(t *testing.T) {
 	integration.BeforeTest(t)
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 5})
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 5, DisableStrictReconfigCheck: true})
 	defer c.Terminate(t)
 
-	if err := c.RemoveMember(t, c.Members[0].Client, uint64(c.Members[4].Server.ID())); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, c.RemoveMember(t, c.Members[0].Client, uint64(c.Members[4].Server.MemberID())))
 	c.WaitMembersForLeader(t, c.Members)
 
 	c.AddMember(t)
@@ -210,15 +204,15 @@ func TestIssue2681(t *testing.T) {
 	clusterMustProgress(t, c.Members)
 }
 
-// Ensure we can remove a member after a snapshot then add a new one back.
+// TestIssue2746 ensures we can remove a member after a snapshot then add a new one back.
 func TestIssue2746(t *testing.T) { testIssue2746(t, 5) }
 
-// With 3 nodes TestIssue2476 sometimes had a shutdown with an inflight snapshot.
+// TestIssue2746WithThree tests with 3 nodes TestIssue2476 sometimes had a shutdown with an inflight snapshot.
 func TestIssue2746WithThree(t *testing.T) { testIssue2746(t, 3) }
 
 func testIssue2746(t *testing.T, members int) {
 	integration.BeforeTest(t)
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: members, SnapshotCount: 10})
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: members, SnapshotCount: 10, DisableStrictReconfigCheck: true})
 	defer c.Terminate(t)
 
 	// force a snapshot
@@ -226,9 +220,7 @@ func testIssue2746(t *testing.T, members int) {
 		clusterMustProgress(t, c.Members)
 	}
 
-	if err := c.RemoveMember(t, c.Members[0].Client, uint64(c.Members[members-1].Server.ID())); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, c.RemoveMember(t, c.Members[0].Client, uint64(c.Members[members-1].Server.MemberID())))
 	c.WaitMembersForLeader(t, c.Members)
 
 	c.AddMember(t)
@@ -236,11 +228,11 @@ func testIssue2746(t *testing.T, members int) {
 	clusterMustProgress(t, c.Members)
 }
 
-// Ensure etcd will not panic when removing a just started member.
+// TestIssue2904 ensures etcd will not panic when removing a just started member.
 func TestIssue2904(t *testing.T) {
 	integration.BeforeTest(t)
 	// start 1-member Cluster to ensure member 0 is the leader of the Cluster.
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 2, UseBridge: true})
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 2, UseBridge: true, DisableStrictReconfigCheck: true})
 	defer c.Terminate(t)
 	c.WaitLeader(t)
 
@@ -248,10 +240,10 @@ func TestIssue2904(t *testing.T) {
 	c.Members[2].Stop(t)
 
 	// send remove member-1 request to the Cluster.
-	ctx, cancel := context.WithTimeout(context.Background(), integration.RequestTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), integration.RequestTimeout)
 	// the proposal is not committed because member 1 is stopped, but the
 	// proposal is appended to leader'Server raft log.
-	c.Members[0].Client.MemberRemove(ctx, uint64(c.Members[2].Server.ID()))
+	c.Members[0].Client.MemberRemove(ctx, uint64(c.Members[2].Server.MemberID()))
 	cancel()
 
 	// restart member, and expect it to send UpdateAttributes request.
@@ -275,7 +267,7 @@ func TestIssue2904(t *testing.T) {
 func TestIssue3699(t *testing.T) {
 	// start a Cluster of 3 nodes a, b, c
 	integration.BeforeTest(t)
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true})
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true, DisableStrictReconfigCheck: true})
 	defer c.Terminate(t)
 
 	// make node a unavailable
@@ -294,7 +286,7 @@ func TestIssue3699(t *testing.T) {
 		// do not restart the killed member immediately.
 		// the member will advance its election timeout after restart,
 		// so it will have a better chance to become the leader again.
-		time.Sleep(time.Duration(integration.ElectionTicks * int(integration.TickDuration)))
+		time.Sleep(time.Duration(integration.ElectionTicks * int(config.TickDuration)))
 		c.Members[leaderID].Restart(t)
 		leaderID = c.WaitMembersForLeader(t, c.Members)
 	}
@@ -304,9 +296,7 @@ func TestIssue3699(t *testing.T) {
 	t.Logf("Restarting member '0'...")
 	// bring back node a
 	// node a will remain useless as long as d is the leader.
-	if err := c.Members[0].Restart(t); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, c.Members[0].Restart(t))
 	t.Logf("Restarted member '0'.")
 
 	select {
@@ -322,17 +312,16 @@ func TestIssue3699(t *testing.T) {
 
 	t.Logf("Expecting successful put...")
 	// try to participate in Cluster
-	ctx, cancel := context.WithTimeout(context.Background(), integration.RequestTimeout)
-	if _, err := c.Members[0].Client.Put(ctx, "/foo", "bar"); err != nil {
-		t.Fatalf("unexpected error on Put (%v)", err)
-	}
+	ctx, cancel := context.WithTimeout(t.Context(), integration.RequestTimeout)
+	_, err := c.Members[0].Client.Put(ctx, "/foo", "bar")
+	require.NoErrorf(t, err, "unexpected error on Put")
 	cancel()
 }
 
 // TestRejectUnhealthyAdd ensures an unhealthy cluster rejects adding members.
 func TestRejectUnhealthyAdd(t *testing.T) {
 	integration.BeforeTest(t)
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true, StrictReconfigCheck: true})
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 3, UseBridge: true})
 	defer c.Terminate(t)
 
 	// make Cluster unhealthy and wait for downed peer
@@ -342,9 +331,7 @@ func TestRejectUnhealthyAdd(t *testing.T) {
 	// all attempts to add member should fail
 	for i := 1; i < len(c.Members); i++ {
 		err := c.AddMemberByURL(t, c.Members[i].Client, "unix://foo:12345")
-		if err == nil {
-			t.Fatalf("should have failed adding peer")
-		}
+		require.Errorf(t, err, "should have failed adding peer")
 		// TODO: client should return descriptive error codes for internal errors
 		if !strings.Contains(err.Error(), "unhealthy cluster") {
 			t.Errorf("unexpected error (%v)", err)
@@ -363,16 +350,14 @@ func TestRejectUnhealthyAdd(t *testing.T) {
 			break
 		}
 	}
-	if err != nil {
-		t.Fatalf("should have added peer to healthy Cluster (%v)", err)
-	}
+	require.NoErrorf(t, err, "should have added peer to healthy Cluster (%v)", err)
 }
 
 // TestRejectUnhealthyRemove ensures an unhealthy cluster rejects removing members
 // if quorum will be lost.
 func TestRejectUnhealthyRemove(t *testing.T) {
 	integration.BeforeTest(t)
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 5, UseBridge: true, StrictReconfigCheck: true})
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 5, UseBridge: true})
 	defer c.Terminate(t)
 
 	// make cluster unhealthy and wait for downed peer; (3 up, 2 down)
@@ -381,22 +366,19 @@ func TestRejectUnhealthyRemove(t *testing.T) {
 	leader := c.WaitLeader(t)
 
 	// reject remove active member since (3,2)-(1,0) => (2,2) lacks quorum
-	err := c.RemoveMember(t, c.Members[leader].Client, uint64(c.Members[2].Server.ID()))
-	if err == nil {
-		t.Fatalf("should reject quorum breaking remove: %s", err)
-	}
+	err := c.RemoveMember(t, c.Members[leader].Client, uint64(c.Members[2].Server.MemberID()))
+	require.Errorf(t, err, "should reject quorum breaking remove: %s", err)
 	// TODO: client should return more descriptive error codes for internal errors
 	if !strings.Contains(err.Error(), "unhealthy cluster") {
 		t.Errorf("unexpected error (%v)", err)
 	}
 
 	// member stopped after launch; wait for missing heartbeats
-	time.Sleep(time.Duration(integration.ElectionTicks * int(integration.TickDuration)))
+	time.Sleep(time.Duration(integration.ElectionTicks * int(config.TickDuration)))
 
 	// permit remove dead member since (3,2) - (0,1) => (3,1) has quorum
-	if err = c.RemoveMember(t, c.Members[2].Client, uint64(c.Members[0].Server.ID())); err != nil {
-		t.Fatalf("should accept removing down member: %s", err)
-	}
+	err = c.RemoveMember(t, c.Members[2].Client, uint64(c.Members[0].Server.MemberID()))
+	require.NoErrorf(t, err, "should accept removing down member")
 
 	// bring cluster to (4,1)
 	c.Members[0].Restart(t)
@@ -405,9 +387,8 @@ func TestRejectUnhealthyRemove(t *testing.T) {
 	time.Sleep((3 * etcdserver.HealthInterval) / 2)
 
 	// accept remove member since (4,1)-(1,0) => (3,1) has quorum
-	if err = c.RemoveMember(t, c.Members[1].Client, uint64(c.Members[0].Server.ID())); err != nil {
-		t.Fatalf("expected to remove member, got error %v", err)
-	}
+	err = c.RemoveMember(t, c.Members[1].Client, uint64(c.Members[0].Server.MemberID()))
+	require.NoErrorf(t, err, "expected to remove member, got error")
 }
 
 // TestRestartRemoved ensures that restarting removed member must exit
@@ -417,11 +398,11 @@ func TestRestartRemoved(t *testing.T) {
 	integration.BeforeTest(t)
 
 	// 1. start single-member Cluster
-	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 1, StrictReconfigCheck: true})
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
 	defer c.Terminate(t)
 
 	// 2. add a new member
-	c.Cfg.StrictReconfigCheck = false
+	c.Cfg.DisableStrictReconfigCheck = true
 	c.AddMember(t)
 	c.WaitLeader(t)
 
@@ -429,17 +410,15 @@ func TestRestartRemoved(t *testing.T) {
 	firstMember.KeepDataDirTerminate = true
 
 	// 3. remove first member, shut down without deleting data
-	if err := c.RemoveMember(t, c.Members[1].Client, uint64(firstMember.Server.ID())); err != nil {
-		t.Fatalf("expected to remove member, got error %v", err)
-	}
+	err := c.RemoveMember(t, c.Members[1].Client, uint64(firstMember.Server.MemberID()))
+	require.NoErrorf(t, err, "expected to remove member, got error")
 	c.WaitLeader(t)
 
 	// 4. restart first member with 'initial-cluster-state=new'
 	// wrong config, expects exit within ReqTimeout
 	firstMember.ServerConfig.NewCluster = false
-	if err := firstMember.Restart(t); err != nil {
-		t.Fatalf("unexpected ForceRestart error: %v", err)
-	}
+	err = firstMember.Restart(t)
+	require.NoErrorf(t, err, "unexpected ForceRestart error")
 	defer func() {
 		firstMember.Close()
 		os.RemoveAll(firstMember.ServerConfig.DataDir)
@@ -462,7 +441,7 @@ func clusterMustProgress(t *testing.T, members []*integration.Member) {
 	)
 	// retry in case of leader loss induced by slow CI
 	for i := 0; i < 3; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), integration.RequestTimeout)
+		ctx, cancel := context.WithTimeout(t.Context(), integration.RequestTimeout)
 		resp, err = members[0].Client.Put(ctx, key, "bar")
 		cancel()
 		if err == nil {
@@ -470,23 +449,17 @@ func clusterMustProgress(t *testing.T, members []*integration.Member) {
 		}
 		t.Logf("failed to create key on #0 (%v)", err)
 	}
-	if err != nil {
-		t.Fatalf("create on #0 error: %v", err)
-	}
+	require.NoErrorf(t, err, "create on #0 error")
 
 	for i, m := range members {
-		mctx, mcancel := context.WithTimeout(context.Background(), integration.RequestTimeout)
+		mctx, mcancel := context.WithTimeout(t.Context(), integration.RequestTimeout)
 		watch := m.Client.Watcher.Watch(mctx, key, clientv3.WithRev(resp.Header.Revision-1))
 		for resp := range watch {
 			if len(resp.Events) != 0 {
 				break
 			}
-			if resp.Err() != nil {
-				t.Fatalf("#%d: watch error: %q", i, resp.Err())
-			}
-			if resp.Canceled {
-				t.Fatalf("#%d: watch: cancelled", i)
-			}
+			require.NoErrorf(t, resp.Err(), "#%d: watch error", i)
+			require.Falsef(t, resp.Canceled, "#%d: watch: cancelled", i)
 		}
 		mcancel()
 	}
@@ -510,4 +483,46 @@ func TestSpeedyTerminate(t *testing.T) {
 		t.Fatalf("Cluster took too long to terminate")
 	case <-donec:
 	}
+}
+
+// TestConcurrentRemoveMember demonstrated a panic in mayRemoveMember with
+// concurrent calls to MemberRemove. To reliably reproduce the panic, a delay
+// needed to be injected in IsMemberExist, which is done using a failpoint.
+// After fixing the bug, IsMemberExist is no longer called by mayRemoveMember.
+func TestConcurrentRemoveMember(t *testing.T) {
+	integration.BeforeTest(t, integration.WithFailpoint("afterIsMemberExist", `sleep("1s")`))
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	defer c.Terminate(t)
+
+	addResp, err := c.Members[0].Client.MemberAddAsLearner(t.Context(), []string{"http://localhost:123"})
+	require.NoError(t, err)
+	removeID := addResp.Member.ID
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(time.Second / 2)
+		c.Members[0].Client.MemberRemove(t.Context(), removeID)
+		close(done)
+	}()
+	_, err = c.Members[0].Client.MemberRemove(t.Context(), removeID)
+	require.NoError(t, err)
+	<-done
+}
+
+func TestConcurrentMoveLeader(t *testing.T) {
+	integration.BeforeTest(t, integration.WithFailpoint("afterIsMemberExist", `sleep("1s")`))
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	defer c.Terminate(t)
+
+	addResp, err := c.Members[0].Client.MemberAddAsLearner(t.Context(), []string{"http://localhost:123"})
+	require.NoError(t, err)
+	removeID := addResp.Member.ID
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(time.Second / 2)
+		c.Members[0].Client.MoveLeader(t.Context(), removeID)
+		close(done)
+	}()
+	_, err = c.Members[0].Client.MemberRemove(t.Context(), removeID)
+	require.NoError(t, err)
+	<-done
 }

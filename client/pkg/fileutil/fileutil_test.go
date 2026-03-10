@@ -26,17 +26,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 )
 
 func TestIsDirWriteable(t *testing.T) {
 	tmpdir := t.TempDir()
-	if err := IsDirWriteable(tmpdir); err != nil {
-		t.Fatalf("unexpected IsDirWriteable error: %v", err)
-	}
-	if err := os.Chmod(tmpdir, 0444); err != nil {
-		t.Fatalf("unexpected os.Chmod error: %v", err)
-	}
+	require.NoErrorf(t, IsDirWriteable(tmpdir), "unexpected IsDirWriteable error")
+	require.NoErrorf(t, os.Chmod(tmpdir, 0o444), "unexpected os.Chmod error")
 	me, err := user.Current()
 	if err != nil {
 		// err can be non-nil when cross compiled
@@ -49,22 +47,16 @@ func TestIsDirWriteable(t *testing.T) {
 		// Chmod is not supported under windows.
 		t.Skipf("running as a superuser or in windows")
 	}
-	if err := IsDirWriteable(tmpdir); err == nil {
-		t.Fatalf("expected IsDirWriteable to error")
-	}
+	require.Errorf(t, IsDirWriteable(tmpdir), "expected IsDirWriteable to error")
 }
 
 func TestCreateDirAll(t *testing.T) {
 	tmpdir := t.TempDir()
 
 	tmpdir2 := filepath.Join(tmpdir, "testdir")
-	if err := CreateDirAll(zaptest.NewLogger(t), tmpdir2); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, CreateDirAll(zaptest.NewLogger(t), tmpdir2))
 
-	if err := os.WriteFile(filepath.Join(tmpdir2, "text.txt"), []byte("test text"), PrivateFileMode); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(filepath.Join(tmpdir2, "text.txt"), []byte("test text"), PrivateFileMode))
 
 	if err := CreateDirAll(zaptest.NewLogger(t), tmpdir2); err == nil || !strings.Contains(err.Error(), "to be empty, got") {
 		t.Fatalf("unexpected error %v", err)
@@ -74,18 +66,14 @@ func TestCreateDirAll(t *testing.T) {
 func TestExist(t *testing.T) {
 	fdir := filepath.Join(os.TempDir(), fmt.Sprint(time.Now().UnixNano()+rand.Int63n(1000)))
 	os.RemoveAll(fdir)
-	if err := os.Mkdir(fdir, 0666); err != nil {
+	if err := os.Mkdir(fdir, 0o666); err != nil {
 		t.Skip(err)
 	}
 	defer os.RemoveAll(fdir)
-	if !Exist(fdir) {
-		t.Fatalf("expected Exist true, got %v", Exist(fdir))
-	}
+	require.Truef(t, Exist(fdir), "expected Exist true, got %v", Exist(fdir))
 
 	f, err := os.CreateTemp(os.TempDir(), "fileutil")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	f.Close()
 
 	if g := Exist(f.Name()); !g {
@@ -101,62 +89,41 @@ func TestExist(t *testing.T) {
 func TestDirEmpty(t *testing.T) {
 	dir := t.TempDir()
 
-	if !DirEmpty(dir) {
-		t.Fatalf("expected DirEmpty true, got %v", DirEmpty(dir))
-	}
+	require.Truef(t, DirEmpty(dir), "expected DirEmpty true, got %v", DirEmpty(dir))
 
 	file, err := os.CreateTemp(dir, "new_file")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	file.Close()
 
-	if DirEmpty(dir) {
-		t.Fatalf("expected DirEmpty false, got %v", DirEmpty(dir))
-	}
-	if DirEmpty(file.Name()) {
-		t.Fatalf("expected DirEmpty false, got %v", DirEmpty(file.Name()))
-	}
+	require.Falsef(t, DirEmpty(dir), "expected DirEmpty false, got %v", DirEmpty(dir))
+	require.Falsef(t, DirEmpty(file.Name()), "expected DirEmpty false, got %v", DirEmpty(file.Name()))
 }
 
 func TestZeroToEnd(t *testing.T) {
 	f, err := os.CreateTemp(os.TempDir(), "fileutil")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer os.Remove(f.Name())
 	defer f.Close()
 
 	// Ensure 0 size is a nop so zero-to-end on an empty file won't give EINVAL.
-	if err = ZeroToEnd(f); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, ZeroToEnd(f))
 
 	b := make([]byte, 1024)
 	for i := range b {
 		b[i] = 12
 	}
-	if _, err = f.Write(b); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = f.Seek(512, io.SeekStart); err != nil {
-		t.Fatal(err)
-	}
-	if err = ZeroToEnd(f); err != nil {
-		t.Fatal(err)
-	}
+	_, err = f.Write(b)
+	require.NoError(t, err)
+	_, err = f.Seek(512, io.SeekStart)
+	require.NoError(t, err)
+	require.NoError(t, ZeroToEnd(f))
 	off, serr := f.Seek(0, io.SeekCurrent)
-	if serr != nil {
-		t.Fatal(serr)
-	}
-	if off != 512 {
-		t.Fatalf("expected offset 512, got %d", off)
-	}
+	require.NoError(t, serr)
+	require.Equalf(t, int64(512), off, "expected offset 512, got %d", off)
 
 	b = make([]byte, 512)
-	if _, err = f.Read(b); err != nil {
-		t.Fatal(err)
-	}
+	_, err = f.Read(b)
+	require.NoError(t, err)
 	for i := range b {
 		if b[i] != 0 {
 			t.Errorf("expected b[%d] = 0, got %d", i, b[i])
@@ -169,27 +136,20 @@ func TestDirPermission(t *testing.T) {
 
 	tmpdir2 := filepath.Join(tmpdir, "testpermission")
 	// create a new dir with 0700
-	if err := CreateDirAll(zaptest.NewLogger(t), tmpdir2); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, CreateDirAll(zaptest.NewLogger(t), tmpdir2))
 	// check dir permission with mode different than created dir
-	if err := CheckDirPermission(tmpdir2, 0600); err == nil {
+	if err := CheckDirPermission(tmpdir2, 0o600); err == nil {
 		t.Errorf("expected error, got nil")
 	}
 }
 
 func TestRemoveMatchFile(t *testing.T) {
 	tmpdir := t.TempDir()
-	defer os.RemoveAll(tmpdir)
 	f, err := os.CreateTemp(tmpdir, "tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	f.Close()
 	f, err = os.CreateTemp(tmpdir, "foo.tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	f.Close()
 
 	err = RemoveMatchFile(zaptest.NewLogger(t), tmpdir, func(fileName string) bool {
@@ -199,17 +159,13 @@ func TestRemoveMatchFile(t *testing.T) {
 		t.Errorf("expected nil, got error")
 	}
 	fnames, err := ReadDir(tmpdir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	if len(fnames) != 1 {
 		t.Errorf("expected exist 1 files, got %d", len(fnames))
 	}
 
 	f, err = os.CreateTemp(tmpdir, "tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	f.Close()
 	err = RemoveMatchFile(zaptest.NewLogger(t), tmpdir, func(fileName string) bool {
 		os.Remove(filepath.Join(tmpdir, fileName))
@@ -218,4 +174,13 @@ func TestRemoveMatchFile(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected error, got nil")
 	}
+}
+
+func TestTouchDirAll(t *testing.T) {
+	tmpdir := t.TempDir()
+	assert.Panicsf(t, func() {
+		TouchDirAll(nil, tmpdir)
+	}, "expected panic with nil log")
+
+	assert.NoError(t, TouchDirAll(zaptest.NewLogger(t), tmpdir))
 }

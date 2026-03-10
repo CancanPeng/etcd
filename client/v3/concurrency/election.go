@@ -90,7 +90,7 @@ func (e *Election) Campaign(ctx context.Context, val string) error {
 		}
 	}
 
-	_, err = waitDeletes(ctx, client, e.keyPrefix, e.leaderRev-1)
+	err = waitDeletes(ctx, client, e.keyPrefix, e.leaderRev-1)
 	if err != nil {
 		// clean up in case of context cancel
 		select {
@@ -196,7 +196,7 @@ func (e *Election) observe(ctx context.Context, ch chan<- v3.GetResponse) {
 				}
 				// only accept puts; a delete will make observe() spin
 				for _, ev := range wr.Events {
-					if ev.Type == mvccpb.PUT {
+					if ev.Type == mvccpb.Event_PUT {
 						hdr, kv = &wr.Header, ev.Kv
 						// may have multiple revs; hdr.rev = the last rev
 						// set to kv's rev in case batch has multiple Puts
@@ -226,7 +226,7 @@ func (e *Election) observe(ctx context.Context, ch chan<- v3.GetResponse) {
 				return
 			}
 			for _, ev := range wr.Events {
-				if ev.Type == mvccpb.DELETE {
+				if ev.Type == mvccpb.Event_DELETE {
 					keyDeleted = true
 					break
 				}

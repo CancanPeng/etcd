@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -120,27 +122,26 @@ func TestResolveTCPAddrs(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			if tt.hostMap[host] == "" {
-				return nil, errors.New("cannot resolve host")
-			}
 			i, err := strconv.Atoi(port)
 			if err != nil {
 				return nil, err
 			}
+			if ip := net.ParseIP(host); ip != nil {
+				return &net.TCPAddr{IP: ip, Port: i, Zone: ""}, nil
+			}
+			if tt.hostMap[host] == "" {
+				return nil, errors.New("cannot resolve host")
+			}
 			return &net.TCPAddr{IP: net.ParseIP(tt.hostMap[host]), Port: i, Zone: ""}, nil
 		}
-		ctx, cancel := context.WithTimeout(context.TODO(), time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		urls, err := resolveTCPAddrs(ctx, zaptest.NewLogger(t), tt.urls)
 		cancel()
 		if tt.hasError {
-			if err == nil {
-				t.Errorf("expected error")
-			}
+			require.Errorf(t, err, "expected error")
 			continue
 		}
-		if !reflect.DeepEqual(urls, tt.expected) {
-			t.Errorf("expected: %v, got %v", tt.expected, urls)
-		}
+		assert.Truef(t, reflect.DeepEqual(urls, tt.expected), "expected: %v, got %v", tt.expected, urls)
 	}
 }
 
@@ -152,16 +153,19 @@ func TestURLsEqual(t *testing.T) {
 		"second.com":  "10.0.11.2",
 	}
 	resolveTCPAddr = func(ctx context.Context, addr string) (*net.TCPAddr, error) {
-		host, port, herr := net.SplitHostPort(addr)
-		if herr != nil {
-			return nil, herr
-		}
-		if _, ok := hostm[host]; !ok {
-			return nil, errors.New("cannot resolve host.")
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
 		}
 		i, err := strconv.Atoi(port)
 		if err != nil {
 			return nil, err
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			return &net.TCPAddr{IP: ip, Port: i, Zone: ""}, nil
+		}
+		if hostm[host] == "" {
+			return nil, errors.New("cannot resolve host")
 		}
 		return &net.TCPAddr{IP: net.ParseIP(hostm[host]), Port: i, Zone: ""}, nil
 	}
@@ -301,10 +305,8 @@ func TestURLsEqual(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		result, err := urlsEqual(context.TODO(), zaptest.NewLogger(t), test.a, test.b)
-		if result != test.expect {
-			t.Errorf("idx=%d #%d: a:%v b:%v, expected %v but %v", i, test.n, test.a, test.b, test.expect, result)
-		}
+		result, err := urlsEqual(t.Context(), zaptest.NewLogger(t), test.a, test.b)
+		assert.Equalf(t, result, test.expect, "idx=%d #%d: a:%v b:%v, expected %v but %v", i, test.n, test.a, test.b, test.expect, result)
 		if test.err != nil {
 			if err.Error() != test.err.Error() {
 				t.Errorf("idx=%d #%d: err expected %v but %v", i, test.n, test.err, err)
@@ -312,6 +314,7 @@ func TestURLsEqual(t *testing.T) {
 		}
 	}
 }
+
 func TestURLStringsEqual(t *testing.T) {
 	defer func() { resolveTCPAddr = resolveTCPAddrDefault }()
 	errOnResolve := func(ctx context.Context, addr string) (*net.TCPAddr, error) {
@@ -330,16 +333,17 @@ func TestURLStringsEqual(t *testing.T) {
 			"http://host1:8080",
 			"http://host2:8080",
 		}, errOnResolve},
+		{
+			urlsA:    []string{"https://[c262:266f:fa53:0ee6:966e:e3f0:d68f:b046]:2380"},
+			urlsB:    []string{"https://[c262:266f:fa53:ee6:966e:e3f0:d68f:b046]:2380"},
+			resolver: resolveTCPAddrDefault,
+		},
 	}
 	for idx, c := range cases {
 		t.Logf("TestURLStringsEqual, case #%d", idx)
 		resolveTCPAddr = c.resolver
-		result, err := URLStringsEqual(context.TODO(), zaptest.NewLogger(t), c.urlsA, c.urlsB)
-		if !result {
-			t.Errorf("unexpected result %v", result)
-		}
-		if err != nil {
-			t.Errorf("unexpected error %v", err)
-		}
+		result, err := URLStringsEqual(t.Context(), zaptest.NewLogger(t), c.urlsA, c.urlsB)
+		assert.Truef(t, result, "unexpected result %v", result)
+		assert.NoErrorf(t, err, "unexpected error %v", err)
 	}
 }

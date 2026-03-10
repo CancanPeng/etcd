@@ -18,15 +18,15 @@ import (
 	"context"
 	"sync"
 
-	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	"go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v3rpc"
-
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/v3rpc"
 )
 
 type watchProxy struct {
@@ -46,6 +46,9 @@ type watchProxy struct {
 	// kv is used for permission checking
 	kv clientv3.KV
 	lg *zap.Logger
+
+	// we want compile errors if new methods are added
+	pb.UnsafeWatchServer
 }
 
 func NewWatchProxy(ctx context.Context, lg *zap.Logger, c *clientv3.Client) (pb.WatchServer, <-chan struct{}) {
@@ -235,10 +238,21 @@ func (wps *watchProxyStream) recvLoop() error {
 		case *pb.WatchRequest_CreateRequest:
 			cr := uv.CreateRequest
 
+			if cr.StartRevision < 0 {
+				wps.watchCh <- &pb.WatchResponse{
+					Header:       &pb.ResponseHeader{},
+					WatchId:      clientv3.InvalidWatchID,
+					Created:      true,
+					Canceled:     true,
+					CancelReason: rpctypes.ErrCompacted.Error(),
+				}
+				continue
+			}
+
 			if err := wps.checkPermissionForWatch(cr.Key, cr.RangeEnd); err != nil {
 				wps.watchCh <- &pb.WatchResponse{
 					Header:       &pb.ResponseHeader{},
-					WatchId:      -1,
+					WatchId:      clientv3.InvalidWatchID,
 					Created:      true,
 					Canceled:     true,
 					CancelReason: err.Error(),
@@ -258,7 +272,7 @@ func (wps *watchProxyStream) recvLoop() error {
 				filters:  v3rpc.FiltersFromRequest(cr),
 			}
 			if !w.wr.valid() {
-				w.post(&pb.WatchResponse{WatchId: -1, Created: true, Canceled: true})
+				w.post(&pb.WatchResponse{WatchId: clientv3.InvalidWatchID, Created: true, Canceled: true})
 				wps.mu.Unlock()
 				continue
 			}

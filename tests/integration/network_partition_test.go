@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
@@ -65,9 +67,7 @@ func TestNetworkPartition5MembersLeaderInMajority(t *testing.T) {
 		}
 		t.Logf("[%d] got %v", i, err)
 	}
-	if err != nil {
-		t.Fatalf("failed after 3 tries (%v)", err)
-	}
+	require.NoErrorf(t, err, "failed after 3 tries (%v)", err)
 }
 
 func testNetworkPartition5MembersLeaderInMajority(t *testing.T) error {
@@ -96,7 +96,7 @@ func testNetworkPartition5MembersLeaderInMajority(t *testing.T) error {
 
 	// leader must be hold in majority
 	leadIndex2 := clus.WaitMembersForLeader(t, majorityMembers)
-	leadID, leadID2 := clus.Members[leadIndex].Server.ID(), majorityMembers[leadIndex2].Server.ID()
+	leadID, leadID2 := clus.Members[leadIndex].Server.MemberID(), majorityMembers[leadIndex2].Server.MemberID()
 	if leadID != leadID2 {
 		return fmt.Errorf("unexpected leader change from %s, got %s", leadID, leadID2)
 	}

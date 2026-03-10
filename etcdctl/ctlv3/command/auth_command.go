@@ -15,9 +15,11 @@
 package command
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
+
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 )
@@ -25,8 +27,10 @@ import (
 // NewAuthCommand returns the cobra command for "auth".
 func NewAuthCommand() *cobra.Command {
 	ac := &cobra.Command{
-		Use:   "auth <enable or disable>",
-		Short: "Enable or disable authentication",
+		Use:     "auth <enable or disable>",
+		Short:   "Enable or disable authentication. Use `etcdctl auth --help` to see subcommands",
+		Long:    "Enable or disable authentication",
+		GroupID: groupAuthenticationID,
 	}
 
 	ac.AddCommand(newAuthEnableCommand())
@@ -81,7 +85,7 @@ func authEnableCommandFunc(cmd *cobra.Command, args []string) {
 		if _, err = cli.AuthEnable(ctx); err == nil {
 			break
 		}
-		if err == rpctypes.ErrRootRoleNotExist {
+		if errors.Is(err, rpctypes.ErrRootRoleNotExist) {
 			if _, err = cli.RoleAdd(ctx, "root"); err != nil {
 				break
 			}

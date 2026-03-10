@@ -21,11 +21,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/api/v3/authpb"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	"go.etcd.io/etcd/client/pkg/v3/testutil"
-	"go.etcd.io/etcd/client/v3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
@@ -35,16 +37,14 @@ func TestV3AuthEmptyUserGet(t *testing.T) {
 	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
-	ctx, cancel := context.WithTimeout(context.TODO(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	api := integration.ToGRPC(clus.Client(0))
 	authSetupRoot(t, api.Auth)
 
 	_, err := api.KV.Range(ctx, &pb.RangeRequest{Key: []byte("abc")})
-	if !eqErrGRPC(err, rpctypes.ErrUserEmpty) {
-		t.Fatalf("got %v, expected %v", err, rpctypes.ErrUserEmpty)
-	}
+	require.Truef(t, eqErrGRPC(err, rpctypes.ErrUserEmpty), "got %v, expected %v", err, rpctypes.ErrUserEmpty)
 }
 
 // TestV3AuthEmptyUserPut ensures that a put with an empty user will return an empty user error,
@@ -57,7 +57,7 @@ func TestV3AuthEmptyUserPut(t *testing.T) {
 	})
 	defer clus.Terminate(t)
 
-	ctx, cancel := context.WithTimeout(context.TODO(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	api := integration.ToGRPC(clus.Client(0))
@@ -68,9 +68,7 @@ func TestV3AuthEmptyUserPut(t *testing.T) {
 	// cluster terminating.
 	for i := 0; i < 10; i++ {
 		_, err := api.KV.Put(ctx, &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")})
-		if !eqErrGRPC(err, rpctypes.ErrUserEmpty) {
-			t.Fatalf("got %v, expected %v", err, rpctypes.ErrUserEmpty)
-		}
+		require.Truef(t, eqErrGRPC(err, rpctypes.ErrUserEmpty), "got %v, expected %v", err, rpctypes.ErrUserEmpty)
 	}
 }
 
@@ -84,12 +82,10 @@ func TestV3AuthTokenWithDisable(t *testing.T) {
 	authSetupRoot(t, integration.ToGRPC(clus.Client(0)).Auth)
 
 	c, cerr := integration.NewClient(t, clientv3.Config{Endpoints: clus.Client(0).Endpoints(), Username: "root", Password: "123"})
-	if cerr != nil {
-		t.Fatal(cerr)
-	}
+	require.NoError(t, cerr)
 	defer c.Close()
 
-	rctx, cancel := context.WithCancel(context.TODO())
+	rctx, cancel := context.WithCancel(t.Context())
 	donec := make(chan struct{})
 	go func() {
 		defer close(donec)
@@ -99,9 +95,8 @@ func TestV3AuthTokenWithDisable(t *testing.T) {
 	}()
 
 	time.Sleep(10 * time.Millisecond)
-	if _, err := c.AuthDisable(context.TODO()); err != nil {
-		t.Fatal(err)
-	}
+	_, err := c.AuthDisable(t.Context())
+	require.NoError(t, err)
 	time.Sleep(10 * time.Millisecond)
 
 	cancel()
@@ -115,23 +110,17 @@ func TestV3AuthRevision(t *testing.T) {
 
 	api := integration.ToGRPC(clus.Client(0))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	presp, perr := api.KV.Put(ctx, &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")})
 	cancel()
-	if perr != nil {
-		t.Fatal(perr)
-	}
+	require.NoError(t, perr)
 	rev := presp.Header.Revision
 
-	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel = context.WithTimeout(t.Context(), 5*time.Second)
 	aresp, aerr := api.Auth.UserAdd(ctx, &pb.AuthUserAddRequest{Name: "root", Password: "123", Options: &authpb.UserAddOptions{NoPassword: false}})
 	cancel()
-	if aerr != nil {
-		t.Fatal(aerr)
-	}
-	if aresp.Header.Revision != rev {
-		t.Fatalf("revision expected %d, got %d", rev, aresp.Header.Revision)
-	}
+	require.NoError(t, aerr)
+	require.Equalf(t, aresp.Header.Revision, rev, "revision expected %d, got %d", rev, aresp.Header.Revision)
 }
 
 // TestV3AuthWithLeaseRevokeWithRoot ensures that granted leases
@@ -160,30 +149,23 @@ func testV3AuthWithLeaseRevokeWithRoot(t *testing.T, ccfg integration.ClusterCon
 		Username:  "root",
 		Password:  "123",
 	})
-	if cerr != nil {
-		t.Fatal(cerr)
-	}
+	require.NoError(t, cerr)
 	defer rootc.Close()
 
-	leaseResp, err := rootc.Grant(context.TODO(), 2)
-	if err != nil {
-		t.Fatal(err)
-	}
+	leaseResp, err := rootc.Grant(t.Context(), 2)
+	require.NoError(t, err)
 	leaseID := leaseResp.ID
 
-	if _, err = rootc.Put(context.TODO(), "foo", "bar", clientv3.WithLease(leaseID)); err != nil {
-		t.Fatal(err)
-	}
+	_, err = rootc.Put(t.Context(), "foo", "bar", clientv3.WithLease(leaseID))
+	require.NoError(t, err)
 
 	// wait for lease expire
 	time.Sleep(3 * time.Second)
 
-	tresp, terr := api.Lease.LeaseTimeToLive(
-		context.TODO(),
-		&pb.LeaseTimeToLiveRequest{
-			ID:   int64(leaseID),
-			Keys: true,
-		},
+	tresp, terr := rootc.TimeToLive(
+		t.Context(),
+		leaseID,
+		clientv3.WithAttachedKeys(),
 	)
 	if terr != nil {
 		t.Error(terr)
@@ -223,28 +205,20 @@ func TestV3AuthWithLeaseRevoke(t *testing.T) {
 	authSetupRoot(t, integration.ToGRPC(clus.Client(0)).Auth)
 
 	rootc, cerr := integration.NewClient(t, clientv3.Config{Endpoints: clus.Client(0).Endpoints(), Username: "root", Password: "123"})
-	if cerr != nil {
-		t.Fatal(cerr)
-	}
+	require.NoError(t, cerr)
 	defer rootc.Close()
 
-	leaseResp, err := rootc.Grant(context.TODO(), 90)
-	if err != nil {
-		t.Fatal(err)
-	}
+	leaseResp, err := rootc.Grant(t.Context(), 90)
+	require.NoError(t, err)
 	leaseID := leaseResp.ID
 	// permission of k3 isn't granted to user1
-	_, err = rootc.Put(context.TODO(), "k3", "val", clientv3.WithLease(leaseID))
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, err = rootc.Put(t.Context(), "k3", "val", clientv3.WithLease(leaseID))
+	require.NoError(t, err)
 
 	userc, cerr := integration.NewClient(t, clientv3.Config{Endpoints: clus.Client(0).Endpoints(), Username: "user1", Password: "user1-123"})
-	if cerr != nil {
-		t.Fatal(cerr)
-	}
+	require.NoError(t, cerr)
 	defer userc.Close()
-	_, err = userc.Revoke(context.TODO(), leaseID)
+	_, err = userc.Revoke(t.Context(), leaseID)
 	if err == nil {
 		t.Fatal("revoking from user1 should be failed with permission denied")
 	}
@@ -276,45 +250,31 @@ func TestV3AuthWithLeaseAttach(t *testing.T) {
 	authSetupRoot(t, integration.ToGRPC(clus.Client(0)).Auth)
 
 	user1c, cerr := integration.NewClient(t, clientv3.Config{Endpoints: clus.Client(0).Endpoints(), Username: "user1", Password: "user1-123"})
-	if cerr != nil {
-		t.Fatal(cerr)
-	}
+	require.NoError(t, cerr)
 	defer user1c.Close()
 
 	user2c, cerr := integration.NewClient(t, clientv3.Config{Endpoints: clus.Client(0).Endpoints(), Username: "user2", Password: "user2-123"})
-	if cerr != nil {
-		t.Fatal(cerr)
-	}
+	require.NoError(t, cerr)
 	defer user2c.Close()
 
-	leaseResp, err := user1c.Grant(context.TODO(), 90)
-	if err != nil {
-		t.Fatal(err)
-	}
+	leaseResp, err := user1c.Grant(t.Context(), 90)
+	require.NoError(t, err)
 	leaseID := leaseResp.ID
 	// permission of k2 is also granted to user2
-	_, err = user1c.Put(context.TODO(), "k2", "val", clientv3.WithLease(leaseID))
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, err = user1c.Put(t.Context(), "k2", "val", clientv3.WithLease(leaseID))
+	require.NoError(t, err)
 
-	_, err = user2c.Revoke(context.TODO(), leaseID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, err = user2c.Revoke(t.Context(), leaseID)
+	require.NoError(t, err)
 
-	leaseResp, err = user1c.Grant(context.TODO(), 90)
-	if err != nil {
-		t.Fatal(err)
-	}
+	leaseResp, err = user1c.Grant(t.Context(), 90)
+	require.NoError(t, err)
 	leaseID = leaseResp.ID
 	// permission of k1 isn't granted to user2
-	_, err = user1c.Put(context.TODO(), "k1", "val", clientv3.WithLease(leaseID))
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, err = user1c.Put(t.Context(), "k1", "val", clientv3.WithLease(leaseID))
+	require.NoError(t, err)
 
-	_, err = user2c.Revoke(context.TODO(), leaseID)
+	_, err = user2c.Revoke(t.Context(), leaseID)
 	if err == nil {
 		t.Fatal("revoking from user2 should be failed with permission denied")
 	}
@@ -322,28 +282,24 @@ func TestV3AuthWithLeaseAttach(t *testing.T) {
 
 func authSetupUsers(t *testing.T, auth pb.AuthClient, users []user) {
 	for _, user := range users {
-		if _, err := auth.UserAdd(context.TODO(), &pb.AuthUserAddRequest{Name: user.name, Password: user.password, Options: &authpb.UserAddOptions{NoPassword: false}}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := auth.RoleAdd(context.TODO(), &pb.AuthRoleAddRequest{Name: user.role}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := auth.UserGrantRole(context.TODO(), &pb.AuthUserGrantRoleRequest{User: user.name, Role: user.role}); err != nil {
-			t.Fatal(err)
-		}
+		_, err := auth.UserAdd(t.Context(), &pb.AuthUserAddRequest{Name: user.name, Password: user.password, Options: &authpb.UserAddOptions{NoPassword: false}})
+		require.NoError(t, err)
+		_, err = auth.RoleAdd(t.Context(), &pb.AuthRoleAddRequest{Name: user.role})
+		require.NoError(t, err)
+		_, err = auth.UserGrantRole(t.Context(), &pb.AuthUserGrantRoleRequest{User: user.name, Role: user.role})
+		require.NoError(t, err)
 
 		if len(user.key) == 0 {
 			continue
 		}
 
 		perm := &authpb.Permission{
-			PermType: authpb.READWRITE,
+			PermType: authpb.Permission_READWRITE,
 			Key:      []byte(user.key),
 			RangeEnd: []byte(user.end),
 		}
-		if _, err := auth.RoleGrantPermission(context.TODO(), &pb.AuthRoleGrantPermissionRequest{Name: user.role, Perm: perm}); err != nil {
-			t.Fatal(err)
-		}
+		_, err = auth.RoleGrantPermission(t.Context(), &pb.AuthRoleGrantPermissionRequest{Name: user.role, Perm: perm})
+		require.NoError(t, err)
 	}
 }
 
@@ -357,9 +313,8 @@ func authSetupRoot(t *testing.T, auth pb.AuthClient) {
 		},
 	}
 	authSetupUsers(t, auth, root)
-	if _, err := auth.AuthEnable(context.TODO(), &pb.AuthEnableRequest{}); err != nil {
-		t.Fatal(err)
-	}
+	_, err := auth.AuthEnable(t.Context(), &pb.AuthEnableRequest{})
+	require.NoError(t, err)
 }
 
 func TestV3AuthNonAuthorizedRPCs(t *testing.T) {
@@ -371,17 +326,13 @@ func TestV3AuthNonAuthorizedRPCs(t *testing.T) {
 
 	key := "foo"
 	val := "bar"
-	_, err := nonAuthedKV.Put(context.TODO(), key, val)
-	if err != nil {
-		t.Fatalf("couldn't put key (%v)", err)
-	}
+	_, err := nonAuthedKV.Put(t.Context(), key, val)
+	require.NoErrorf(t, err, "couldn't put key (%v)", err)
 
 	authSetupRoot(t, integration.ToGRPC(clus.Client(0)).Auth)
 
-	respput, err := nonAuthedKV.Put(context.TODO(), key, val)
-	if !eqErrGRPC(err, rpctypes.ErrGRPCUserEmpty) {
-		t.Fatalf("could put key (%v), it should cause an error of permission denied", respput)
-	}
+	respput, err := nonAuthedKV.Put(t.Context(), key, val)
+	require.Truef(t, eqErrGRPC(err, rpctypes.ErrGRPCUserEmpty), "could put key (%v), it should cause an error of permission denied", respput)
 }
 
 func TestV3AuthOldRevConcurrent(t *testing.T) {
@@ -397,21 +348,21 @@ func TestV3AuthOldRevConcurrent(t *testing.T) {
 		Username:    "root",
 		Password:    "123",
 	})
-	testutil.AssertNil(t, cerr)
+	require.NoError(t, cerr)
 	defer c.Close()
 
 	var wg sync.WaitGroup
 	f := func(i int) {
 		defer wg.Done()
 		role, user := fmt.Sprintf("test-role-%d", i), fmt.Sprintf("test-user-%d", i)
-		_, err := c.RoleAdd(context.TODO(), role)
-		testutil.AssertNil(t, err)
-		_, err = c.RoleGrantPermission(context.TODO(), role, "", clientv3.GetPrefixRangeEnd(""), clientv3.PermissionType(clientv3.PermReadWrite))
-		testutil.AssertNil(t, err)
-		_, err = c.UserAdd(context.TODO(), user, "123")
-		testutil.AssertNil(t, err)
-		_, err = c.Put(context.TODO(), "a", "b")
-		testutil.AssertNil(t, err)
+		_, err := c.RoleAdd(t.Context(), role)
+		require.NoError(t, err)
+		_, err = c.RoleGrantPermission(t.Context(), role, "\x00", clientv3.GetPrefixRangeEnd(""), clientv3.PermissionType(clientv3.PermReadWrite))
+		require.NoError(t, err)
+		_, err = c.UserAdd(t.Context(), user, "123")
+		require.NoError(t, err)
+		_, err = c.Put(t.Context(), "a", "b")
+		assert.NoError(t, err)
 	}
 	// needs concurrency to trigger
 	numRoles := 2
@@ -420,4 +371,54 @@ func TestV3AuthOldRevConcurrent(t *testing.T) {
 		go f(i)
 	}
 	wg.Wait()
+}
+
+func TestV3AuthWatchErrorAndWatchId0(t *testing.T) {
+	integration.BeforeTest(t)
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
+	defer clus.Terminate(t)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	users := []user{
+		{
+			name:     "user1",
+			password: "user1-123",
+			role:     "role1",
+			key:      "k1",
+			end:      "k2",
+		},
+	}
+	authSetupUsers(t, integration.ToGRPC(clus.Client(0)).Auth, users)
+
+	authSetupRoot(t, integration.ToGRPC(clus.Client(0)).Auth)
+
+	c, cerr := integration.NewClient(t, clientv3.Config{Endpoints: clus.Client(0).Endpoints(), Username: "user1", Password: "user1-123"})
+	require.NoError(t, cerr)
+	defer c.Close()
+
+	watchStartCh, watchEndCh := make(chan any), make(chan any)
+
+	go func() {
+		wChan := c.Watch(ctx, "k1", clientv3.WithRev(1))
+		watchStartCh <- struct{}{}
+		watchResponse := <-wChan
+		t.Logf("watch response from k1: %v", watchResponse)
+		assert.NotEmpty(t, watchResponse.Events)
+		watchEndCh <- struct{}{}
+	}()
+
+	// Chan for making sure that the above goroutine invokes Watch()
+	// So the above Watch() can get watch ID = 0
+	<-watchStartCh
+
+	wChan := c.Watch(ctx, "non-allowed-key", clientv3.WithRev(1))
+	watchResponse := <-wChan
+	require.Error(t, watchResponse.Err()) // permission denied
+
+	_, err := c.Put(ctx, "k1", "val")
+	require.NoErrorf(t, err, "Unexpected error from Put: %v", err)
+
+	<-watchEndCh
 }

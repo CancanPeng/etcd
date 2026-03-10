@@ -15,10 +15,33 @@
 package e2e
 
 import (
-	"go.etcd.io/etcd/pkg/v3/expect"
+	"os"
+	"strings"
+
 	"go.uber.org/zap"
+
+	"go.etcd.io/etcd/pkg/v3/expect"
 )
 
 func SpawnCmd(args []string, envVars map[string]string) (*expect.ExpectProcess, error) {
-	return SpawnCmdWithLogger(zap.NewNop(), args, envVars)
+	return SpawnNamedCmd(strings.Join(args, "_"), args, envVars)
+}
+
+func SpawnNamedCmd(processName string, args []string, envVars map[string]string) (*expect.ExpectProcess, error) {
+	return SpawnCmdWithLogger(zap.NewNop(), args, envVars, processName)
+}
+
+func SpawnCmdWithLogger(lg *zap.Logger, args []string, envVars map[string]string, name string) (*expect.ExpectProcess, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+
+	env := mergeEnvVariables(envVars)
+	lg.Info("spawning process",
+		zap.Strings("args", args),
+		zap.String("working-dir", wd),
+		zap.String("name", name),
+		zap.Strings("environment-variables", env))
+	return expect.NewExpectWithEnv(args[0], args[1:], env, name)
 }

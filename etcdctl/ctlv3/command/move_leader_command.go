@@ -19,16 +19,18 @@ import (
 	"strconv"
 
 	"github.com/spf13/cobra"
-	"go.etcd.io/etcd/client/v3"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 )
 
 // NewMoveLeaderCommand returns the cobra command for "move-leader".
 func NewMoveLeaderCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "move-leader <transferee-member-id>",
-		Short: "Transfers leadership to another etcd cluster member.",
-		Run:   transferLeadershipCommandFunc,
+		Use:     "move-leader <transferee-member-id>",
+		Short:   "Transfers leadership to another etcd cluster member.",
+		Run:     transferLeadershipCommandFunc,
+		GroupID: groupClusterMaintenanceID,
 	}
 	return cmd
 }
@@ -43,9 +45,10 @@ func transferLeadershipCommandFunc(cmd *cobra.Command, args []string) {
 		cobrautl.ExitWithError(cobrautl.ExitBadArgs, err)
 	}
 
-	c := mustClientFromCmd(cmd)
-	eps := c.Endpoints()
-	c.Close()
+	cfg := clientConfigFromCmd(cmd)
+	cli := mustClient(cfg)
+	eps := cli.Endpoints()
+	cli.Close()
 
 	ctx, cancel := commandCtx(cmd)
 
@@ -53,7 +56,6 @@ func transferLeadershipCommandFunc(cmd *cobra.Command, args []string) {
 	var leaderCli *clientv3.Client
 	var leaderID uint64
 	for _, ep := range eps {
-		cfg := clientConfigFromCmd(cmd)
 		cfg.Endpoints = []string{ep}
 		cli := mustClient(cfg)
 		resp, serr := cli.Status(ctx, ep)

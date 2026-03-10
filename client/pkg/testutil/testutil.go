@@ -16,6 +16,8 @@
 package testutil
 
 import (
+	"flag"
+	"log"
 	"net/url"
 	"os"
 	"runtime"
@@ -30,6 +32,7 @@ func WaitSchedule() {
 }
 
 func MustNewURLs(t *testing.T, urls []string) []url.URL {
+	t.Helper()
 	if urls == nil {
 		return nil
 	}
@@ -42,6 +45,7 @@ func MustNewURLs(t *testing.T, urls []string) []url.URL {
 }
 
 func MustNewURL(t *testing.T, s string) *url.URL {
+	t.Helper()
 	u, err := url.Parse(s)
 	if err != nil {
 		t.Fatalf("parse %v error: %v", s, err)
@@ -51,6 +55,7 @@ func MustNewURL(t *testing.T, s string) *url.URL {
 
 // FatalStack helps to fatal the test and print out the stacks of all running goroutines.
 func FatalStack(t *testing.T, s string) {
+	t.Helper()
 	stackTrace := make([]byte, 1024*1024)
 	n := runtime.Stack(stackTrace, true)
 	t.Errorf("---> Test failed: %s", s)
@@ -97,10 +102,13 @@ func SkipTestIfShortMode(t TB, reason string) {
 // ExitInShortMode closes the current process (with 0) if the short test mode detected.
 //
 // To be used in Test-main, where test context (testing.TB) is not available.
-//
-// Requires custom env-variable (GOLANG_TEST_SHORT) apart of `go test --short flag`.
 func ExitInShortMode(reason string) {
-	if os.Getenv("GOLANG_TEST_SHORT") == "true" {
+	// Calling testing.Short() requires flags to be parsed before.
+	if !flag.Parsed() {
+		flag.Parse()
+	}
+	if testing.Short() {
+		log.Println(reason)
 		os.Exit(0)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/tests/v3/framework/config"
 	"go.etcd.io/etcd/tests/v3/framework/testutils"
@@ -28,45 +29,20 @@ import (
 func TestLeaseGrantTimeToLive(t *testing.T) {
 	testRunner.BeforeTest(t)
 
-	tcs := []struct {
-		name   string
-		config config.ClusterConfig
-	}{
-		{
-			name:   "NoTLS",
-			config: config.ClusterConfig{ClusterSize: 1},
-		},
-		{
-			name:   "PeerTLS",
-			config: config.ClusterConfig{ClusterSize: 3, PeerTLS: config.ManualTLS},
-		},
-		{
-			name:   "PeerAutoTLS",
-			config: config.ClusterConfig{ClusterSize: 3, PeerTLS: config.AutoTLS},
-		},
-		{
-			name:   "ClientTLS",
-			config: config.ClusterConfig{ClusterSize: 1, ClientTLS: config.ManualTLS},
-		},
-		{
-			name:   "ClientAutoTLS",
-			config: config.ClusterConfig{ClusterSize: 1, ClientTLS: config.AutoTLS},
-		},
-	}
-	for _, tc := range tcs {
+	for _, tc := range clusterTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			clus := testRunner.NewCluster(ctx, t, tc.config)
+			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(tc.config))
 			defer clus.Close()
-			cc := clus.Client()
+			cc := testutils.MustClient(clus.Client())
 
 			testutils.ExecuteUntil(ctx, t, func() {
 				ttl := int64(10)
-				leaseResp, err := cc.Grant(ttl)
+				leaseResp, err := cc.Grant(ctx, ttl)
 				require.NoError(t, err)
 
-				ttlResp, err := cc.TimeToLive(leaseResp.ID, config.LeaseOption{})
+				ttlResp, err := cc.TimeToLive(ctx, leaseResp.ID, config.LeaseOption{})
 				require.NoError(t, err)
 				require.Equal(t, ttl, ttlResp.GrantedTTL)
 			})
@@ -77,7 +53,7 @@ func TestLeaseGrantTimeToLive(t *testing.T) {
 func TestLeaseGrantAndList(t *testing.T) {
 	testRunner.BeforeTest(t)
 
-	for _, tc := range clusterTestCases {
+	for _, tc := range clusterTestCases() {
 		nestedCases := []struct {
 			name       string
 			leaseCount int
@@ -98,28 +74,28 @@ func TestLeaseGrantAndList(t *testing.T) {
 
 		for _, nc := range nestedCases {
 			t.Run(tc.name+"/"+nc.name, func(t *testing.T) {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 				defer cancel()
 				t.Logf("Creating cluster...")
-				clus := testRunner.NewCluster(ctx, t, tc.config)
+				clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(tc.config))
 				defer clus.Close()
-				cc := clus.Client()
+				cc := testutils.MustClient(clus.Client())
 				t.Logf("Created cluster and client")
 				testutils.ExecuteUntil(ctx, t, func() {
-					createdLeases := []clientv3.LeaseID{}
+					var createdLeases []clientv3.LeaseID
 					for i := 0; i < nc.leaseCount; i++ {
-						leaseResp, err := cc.Grant(10)
+						leaseResp, err := cc.Grant(ctx, 10)
 						t.Logf("Grant returned: resp:%s err:%v", leaseResp.String(), err)
 						require.NoError(t, err)
 						createdLeases = append(createdLeases, leaseResp.ID)
 					}
 
-					// Because we're not guarunteed to talk to the same member, wait for
-					// listing to eventually return true, either by the result propagaing
+					// Because we're not guaranteed to talk to the same member, wait for
+					// listing to eventually return true, either by the result propagating
 					// or by hitting an up to date member.
-					leases := []clientv3.LeaseStatus{}
+					var leases []clientv3.LeaseStatus
 					require.Eventually(t, func() bool {
-						resp, err := cc.LeaseList()
+						resp, err := cc.Leases(ctx)
 						if err != nil {
 							return false
 						}
@@ -144,32 +120,48 @@ func TestLeaseGrantAndList(t *testing.T) {
 func TestLeaseGrantTimeToLiveExpired(t *testing.T) {
 	testRunner.BeforeTest(t)
 
-	for _, tc := range clusterTestCases {
+	for _, tc := range clusterTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
-			clus := testRunner.NewCluster(ctx, t, tc.config)
+			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(tc.config))
 			defer clus.Close()
-			cc := clus.Client()
+			cc := testutils.MustClient(clus.Client())
 
 			testutils.ExecuteUntil(ctx, t, func() {
-				leaseResp, err := cc.Grant(2)
+				leaseResp, err := cc.Grant(ctx, 2)
 				require.NoError(t, err)
 
-				err = cc.Put("foo", "bar", config.PutOptions{LeaseID: leaseResp.ID})
+				_, err = cc.Put(ctx, "foo", "bar", config.PutOptions{LeaseID: leaseResp.ID})
 				require.NoError(t, err)
 
-				getResp, err := cc.Get("foo", config.GetOptions{})
+				getResp, err := cc.Get(ctx, "foo", config.GetOptions{})
 				require.NoError(t, err)
 				require.Equal(t, int64(1), getResp.Count)
 
-				time.Sleep(3 * time.Second)
+				// FIXME: When leader changes, old leader steps
+				// back to follower and ignores the lease revoking.
+				// The new leader will restart TTL counting. If so,
+				// we should call time.Sleep again and wait for revoking.
+				// It can't avoid flakey but reduce flakey possibility.
+				for i := 0; i < 3; i++ {
+					currentLeader := clus.WaitLeader(t)
+					t.Logf("[%d] current leader index %d", i, currentLeader)
 
-				ttlResp, err := cc.TimeToLive(leaseResp.ID, config.LeaseOption{})
+					time.Sleep(3 * time.Second)
+
+					newLeader := clus.WaitLeader(t)
+					if newLeader == currentLeader {
+						break
+					}
+					t.Logf("[%d] leader changed, new leader index %d", i, newLeader)
+				}
+
+				ttlResp, err := cc.TimeToLive(ctx, leaseResp.ID, config.LeaseOption{})
 				require.NoError(t, err)
 				require.Equal(t, int64(-1), ttlResp.TTL)
 
-				getResp, err = cc.Get("foo", config.GetOptions{})
+				getResp, err = cc.Get(ctx, "foo", config.GetOptions{})
 				require.NoError(t, err)
 				// Value should expire with the lease
 				require.Equal(t, int64(0), getResp.Count)
@@ -181,24 +173,40 @@ func TestLeaseGrantTimeToLiveExpired(t *testing.T) {
 func TestLeaseGrantKeepAliveOnce(t *testing.T) {
 	testRunner.BeforeTest(t)
 
-	for _, tc := range clusterTestCases {
+	for _, tc := range clusterTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
-			clus := testRunner.NewCluster(ctx, t, tc.config)
+			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(tc.config))
 			defer clus.Close()
-			cc := clus.Client()
+			cc := testutils.MustClient(clus.Client())
 
 			testutils.ExecuteUntil(ctx, t, func() {
-				leaseResp, err := cc.Grant(2)
+				leaseResp, err := cc.Grant(ctx, 2)
 				require.NoError(t, err)
 
-				_, err = cc.LeaseKeepAliveOnce(leaseResp.ID)
+				_, err = cc.KeepAliveOnce(ctx, leaseResp.ID)
 				require.NoError(t, err)
 
-				time.Sleep(2 * time.Second) // Wait for the original lease to expire
+				// FIXME: When leader changes, old leader steps
+				// back to follower and ignores the lease revoking.
+				// The new leader will restart TTL counting. If so,
+				// we should call time.Sleep again and wait for revoking.
+				// It can't avoid flakey but reduce flakey possibility.
+				for i := 0; i < 3; i++ {
+					currentLeader := clus.WaitLeader(t)
+					t.Logf("[%d] current leader index %d", i, currentLeader)
 
-				ttlResp, err := cc.TimeToLive(leaseResp.ID, config.LeaseOption{})
+					time.Sleep(2 * time.Second)
+
+					newLeader := clus.WaitLeader(t)
+					if newLeader == currentLeader {
+						break
+					}
+					t.Logf("[%d] leader changed, new leader index %d", i, newLeader)
+				}
+
+				ttlResp, err := cc.TimeToLive(ctx, leaseResp.ID, config.LeaseOption{})
 				require.NoError(t, err)
 				// We still have a lease!
 				require.Greater(t, int64(2), ttlResp.TTL)
@@ -210,33 +218,33 @@ func TestLeaseGrantKeepAliveOnce(t *testing.T) {
 func TestLeaseGrantRevoke(t *testing.T) {
 	testRunner.BeforeTest(t)
 
-	for _, tc := range clusterTestCases {
+	for _, tc := range clusterTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			clus := testRunner.NewCluster(ctx, t, tc.config)
+			clus := testRunner.NewCluster(ctx, t, config.WithClusterConfig(tc.config))
 			defer clus.Close()
-			cc := clus.Client()
+			cc := testutils.MustClient(clus.Client())
 
 			testutils.ExecuteUntil(ctx, t, func() {
-				leaseResp, err := cc.Grant(20)
+				leaseResp, err := cc.Grant(ctx, 20)
 				require.NoError(t, err)
 
-				err = cc.Put("foo", "bar", config.PutOptions{LeaseID: leaseResp.ID})
+				_, err = cc.Put(ctx, "foo", "bar", config.PutOptions{LeaseID: leaseResp.ID})
 				require.NoError(t, err)
 
-				getResp, err := cc.Get("foo", config.GetOptions{})
+				getResp, err := cc.Get(ctx, "foo", config.GetOptions{})
 				require.NoError(t, err)
 				require.Equal(t, int64(1), getResp.Count)
 
-				_, err = cc.LeaseRevoke(leaseResp.ID)
+				_, err = cc.Revoke(ctx, leaseResp.ID)
 				require.NoError(t, err)
 
-				ttlResp, err := cc.TimeToLive(leaseResp.ID, config.LeaseOption{})
+				ttlResp, err := cc.TimeToLive(ctx, leaseResp.ID, config.LeaseOption{})
 				require.NoError(t, err)
 				require.Equal(t, int64(-1), ttlResp.TTL)
 
-				getResp, err = cc.Get("foo", config.GetOptions{})
+				getResp, err = cc.Get(ctx, "foo", config.GetOptions{})
 				require.NoError(t, err)
 				// Value should expire with the lease
 				require.Equal(t, int64(0), getResp.Count)

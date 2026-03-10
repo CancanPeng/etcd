@@ -22,9 +22,9 @@ import (
 	"strings"
 	"time"
 
-	"go.etcd.io/etcd/client/pkg/v3/transport"
-
 	"go.uber.org/zap"
+
+	"go.etcd.io/etcd/client/pkg/v3/transport"
 )
 
 func fetchMetrics(ep string) (lines []string, err error) {
@@ -207,7 +207,6 @@ func parse(lines []string) (mss []metric) {
 			mss[i].grpcCodes = sortMap(codes)
 			mss[i].metrics = sortMap(metrics)
 		}
-
 	}
 	return mss
 }

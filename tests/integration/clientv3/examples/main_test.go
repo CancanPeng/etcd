@@ -15,14 +15,13 @@
 package clientv3_test
 
 import (
-	"io/ioutil"
 	"log"
 	"os"
 	"testing"
 	"time"
 
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
+	framework "go.etcd.io/etcd/tests/v3/framework/integration"
 	"go.etcd.io/etcd/tests/v3/integration"
 )
 
@@ -32,11 +31,13 @@ const (
 )
 
 var lazyCluster = integration.NewLazyClusterWithConfig(
-	integration2.ClusterConfig{
+	framework.ClusterConfig{
 		Size:                        3,
-		WatchProgressNotifyInterval: 200 * time.Millisecond})
+		WatchProgressNotifyInterval: 200 * time.Millisecond,
+		DisableStrictReconfigCheck:  true,
+	})
 
-func exampleEndpoints() []string { return lazyCluster.EndpointsV3() }
+func exampleEndpoints() []string { return lazyCluster.EndpointsGRPC() }
 
 func forUnitTestsRunInMockedContext(_ func(), example func()) {
 	// For integration tests runs in the provided environment
@@ -47,7 +48,7 @@ func forUnitTestsRunInMockedContext(_ func(), example func()) {
 func TestMain(m *testing.M) {
 	testutil.ExitInShortMode("Skipping: the tests require real cluster")
 
-	tempDir, err := ioutil.TempDir(os.TempDir(), "etcd-integration")
+	tempDir, err := os.MkdirTemp(os.TempDir(), "etcd-integration")
 	if err != nil {
 		log.Printf("Failed to obtain tempDir: %v", tempDir)
 		os.Exit(1)

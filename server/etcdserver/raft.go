@@ -21,13 +21,14 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	"go.etcd.io/etcd/pkg/v3/contention"
-	"go.etcd.io/etcd/raft/v3"
-	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
 	serverstorage "go.etcd.io/etcd/server/v3/storage"
-	"go.uber.org/zap"
+	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 const (
@@ -51,7 +52,7 @@ var (
 )
 
 func init() {
-	expvar.Publish("raft.status", expvar.Func(func() interface{} {
+	expvar.Publish("raft.status", expvar.Func(func() any {
 		raftStatusMu.Lock()
 		defer raftStatusMu.Unlock()
 		if raftStatus == nil {
@@ -61,28 +62,34 @@ func init() {
 	}))
 }
 
-// apply contains entries, snapshot to be applied. Once
-// an apply is consumed, the entries will be persisted to
-// to raft storage concurrently; the application must read
-// raftDone before assuming the raft messages are stable.
-type apply struct {
+// toApply contains entries, snapshot to be applied. Once
+// an toApply is consumed, the entries will be persisted to
+// raft storage concurrently; the application must read
+// notifyc before assuming the raft messages are stable.
+type toApply struct {
 	entries  []raftpb.Entry
 	snapshot raftpb.Snapshot
 	// notifyc synchronizes etcd server applies with the raft node
 	notifyc chan struct{}
+	// raftAdvancedC notifies EtcdServer.apply that
+	// 'raftLog.applied' has advanced by r.Advance
+	// it should be used only when entries contain raftpb.EntryConfChange
+	raftAdvancedC <-chan struct{}
 }
 
 type raftNode struct {
 	lg *zap.Logger
 
-	tickMu *sync.Mutex
+	tickMu *sync.RWMutex
+	// timestamp of the latest tick
+	latestTickTs time.Time
 	raftNodeConfig
 
 	// a chan to send/receive snapshot
 	msgSnapC chan raftpb.Message
 
 	// a chan to send out apply
-	applyc chan apply
+	applyc chan toApply
 
 	// a chan to send out readState
 	readStateC chan raft.ReadState
@@ -127,14 +134,15 @@ func newRaftNode(cfg raftNodeConfig) *raftNode {
 	raft.SetLogger(lg)
 	r := &raftNode{
 		lg:             cfg.lg,
-		tickMu:         new(sync.Mutex),
+		tickMu:         new(sync.RWMutex),
 		raftNodeConfig: cfg,
+		latestTickTs:   time.Now(),
 		// set up contention detectors for raft heartbeat message.
 		// expect to send a heartbeat within 2 heartbeat intervals.
 		td:         contention.NewTimeoutDetector(2 * cfg.heartbeat),
 		readStateC: make(chan raft.ReadState, 1),
 		msgSnapC:   make(chan raftpb.Message, maxInFlightMsgSnap),
-		applyc:     make(chan apply),
+		applyc:     make(chan toApply),
 		stopped:    make(chan struct{}),
 		done:       make(chan struct{}),
 	}
@@ -150,7 +158,14 @@ func newRaftNode(cfg raftNodeConfig) *raftNode {
 func (r *raftNode) tick() {
 	r.tickMu.Lock()
 	r.Tick()
+	r.latestTickTs = time.Now()
 	r.tickMu.Unlock()
+}
+
+func (r *raftNode) getLatestTickTs() time.Time {
+	r.tickMu.RLock()
+	defer r.tickMu.RUnlock()
+	return r.latestTickTs
 }
 
 // start prepares and starts raftNode in a new goroutine. It is no longer safe
@@ -201,10 +216,12 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 				}
 
 				notifyc := make(chan struct{}, 1)
-				ap := apply{
-					entries:  rd.CommittedEntries,
-					snapshot: rd.Snapshot,
-					notifyc:  notifyc,
+				raftAdvancedC := make(chan struct{}, 1)
+				ap := toApply{
+					entries:       rd.CommittedEntries,
+					snapshot:      rd.Snapshot,
+					notifyc:       notifyc,
+					raftAdvancedC: raftAdvancedC,
 				}
 
 				updateCommittedIndex(&ap, rh)
@@ -215,7 +232,7 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 					return
 				}
 
-				// the leader can write to its disk in parallel with replicating to the followers and them
+				// the leader can write to its disk in parallel with replicating to the followers and then
 				// writing to their disks.
 				// For more details, check raft thesis 10.2.1
 				if islead {
@@ -267,8 +284,16 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 
 				r.raftStorage.Append(rd.Entries)
 
+				confChanged := false
+				for _, ent := range rd.CommittedEntries {
+					if ent.Type == raftpb.EntryConfChange {
+						confChanged = true
+						break
+					}
+				}
+
 				if !islead {
-					// finish processing incoming messages before we signal raftdone chan
+					// finish processing incoming messages before we signal notifyc chan
 					msgs := r.processMessages(rd.Messages)
 
 					// now unblocks 'applyAll' that waits on Raft log disk writes before triggering snapshots
@@ -278,17 +303,11 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 					// changes to be applied before sending messages.
 					// Otherwise we might incorrectly count votes (e.g. votes from removed members).
 					// Also slow machine's follower raft-layer could proceed to become the leader
-					// on its own single-node cluster, before apply-layer applies the config change.
+					// on its own single-node cluster, before toApply-layer applies the config change.
 					// We simply wait for ALL pending entries to be applied for now.
 					// We might improve this later on if it causes unnecessary long blocking issues.
-					waitApply := false
-					for _, ent := range rd.CommittedEntries {
-						if ent.Type == raftpb.EntryConfChange {
-							waitApply = true
-							break
-						}
-					}
-					if waitApply {
+
+					if confChanged {
 						// blocks until 'applyAll' calls 'applyWait.Trigger'
 						// to be in sync with scheduled config-change job
 						// (assume notifyc has cap of 1)
@@ -306,7 +325,13 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 					notifyc <- struct{}{}
 				}
 
+				// gofail: var raftBeforeAdvance struct{}
 				r.Advance()
+
+				if confChanged {
+					// notify etcdserver that raft has already been notified or advanced.
+					raftAdvancedC <- struct{}{}
+				}
 			case <-r.stopped:
 				return
 			}
@@ -314,7 +339,7 @@ func (r *raftNode) start(rh *raftReadyHandler) {
 	}()
 }
 
-func updateCommittedIndex(ap *apply, rh *raftReadyHandler) {
+func updateCommittedIndex(ap *toApply, rh *raftReadyHandler) {
 	var ci uint64
 	if len(ap.entries) != 0 {
 		ci = ap.entries[len(ap.entries)-1].Index
@@ -332,6 +357,7 @@ func (r *raftNode) processMessages(ms []raftpb.Message) []raftpb.Message {
 	for i := len(ms) - 1; i >= 0; i-- {
 		if r.isIDRemoved(ms[i].To) {
 			ms[i].To = 0
+			continue
 		}
 
 		if ms[i].Type == raftpb.MsgAppResp {
@@ -372,12 +398,19 @@ func (r *raftNode) processMessages(ms []raftpb.Message) []raftpb.Message {
 	return ms
 }
 
-func (r *raftNode) apply() chan apply {
+func (r *raftNode) apply() chan toApply {
 	return r.applyc
 }
 
 func (r *raftNode) stop() {
-	r.stopped <- struct{}{}
+	select {
+	case r.stopped <- struct{}{}:
+		// Not already stopped, so trigger it
+	case <-r.done:
+		// Has already been stopped - no need to do anything
+		return
+	}
+	// Block until the stop has been acknowledged by start()
 	<-r.done
 }
 

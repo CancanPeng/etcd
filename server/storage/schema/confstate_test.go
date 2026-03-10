@@ -18,9 +18,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"go.etcd.io/etcd/raft/v3/raftpb"
-	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
 	"go.uber.org/zap/zaptest"
+
+	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 func TestConfStateFromBackendInOneTx(t *testing.T) {
@@ -53,8 +54,8 @@ func TestMustUnsafeSaveConfStateToBackend(t *testing.T) {
 
 	t.Run("missing", func(t *testing.T) {
 		tx := be.ReadTx()
-		tx.Lock()
-		defer tx.Unlock()
+		tx.RLock()
+		defer tx.RUnlock()
 		assert.Nil(t, UnsafeConfStateFromBackend(lg, tx))
 	})
 
@@ -70,8 +71,8 @@ func TestMustUnsafeSaveConfStateToBackend(t *testing.T) {
 
 	t.Run("read", func(t *testing.T) {
 		tx := be.ReadTx()
-		tx.Lock()
-		defer tx.Unlock()
+		tx.RLock()
+		defer tx.RUnlock()
 		assert.Equal(t, confState, *UnsafeConfStateFromBackend(lg, tx))
 	})
 }

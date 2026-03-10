@@ -20,13 +20,13 @@ import (
 	"testing"
 	"time"
 
-	"go.etcd.io/etcd/client/pkg/v3/testutil"
-	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/raft/v3/raftpb"
-	stats "go.etcd.io/etcd/server/v3/etcdserver/api/v2stats"
+	"github.com/xiang90/probing"
 	"go.uber.org/zap/zaptest"
 
-	"github.com/xiang90/probing"
+	"go.etcd.io/etcd/client/pkg/v3/testutil"
+	"go.etcd.io/etcd/client/pkg/v3/types"
+	stats "go.etcd.io/etcd/server/v3/etcdserver/api/v2stats"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 // TestTransportSend tests that transport can send messages using correct
@@ -134,6 +134,25 @@ func TestTransportRemove(t *testing.T) {
 		streamProber:   probing.NewProber(nil),
 	}
 	tr.AddPeer(1, []string{"http://localhost:2380"})
+	tr.RemovePeer(types.ID(1))
+	defer tr.Stop()
+
+	if _, ok := tr.peers[types.ID(1)]; ok {
+		t.Fatalf("senders[1] exists, want removed")
+	}
+}
+
+func TestTransportRemoveIsIdempotent(t *testing.T) {
+	tr := &Transport{
+		LeaderStats:    stats.NewLeaderStats(zaptest.NewLogger(t), ""),
+		streamRt:       &roundTripperRecorder{},
+		peers:          make(map[types.ID]Peer),
+		pipelineProber: probing.NewProber(nil),
+		streamProber:   probing.NewProber(nil),
+	}
+
+	tr.AddPeer(1, []string{"http://localhost:2380"})
+	tr.RemovePeer(types.ID(1))
 	tr.RemovePeer(types.ID(1))
 	defer tr.Stop()
 

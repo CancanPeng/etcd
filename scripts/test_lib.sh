@@ -1,4 +1,21 @@
 #!/usr/bin/env bash
+# Copyright 2025 The etcd Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -euo pipefail
+
+source ./scripts/test_utils.sh
 
 ROOT_MODULE="go.etcd.io/etcd"
 
@@ -13,103 +30,7 @@ function set_root_dir {
 
 set_root_dir
 
-####   Convenient IO methods #####
-
-COLOR_RED='\033[0;31m'
-COLOR_ORANGE='\033[0;33m'
-COLOR_GREEN='\033[0;32m'
-COLOR_LIGHTCYAN='\033[0;36m'
-COLOR_BLUE='\033[0;94m'
-COLOR_MAGENTA='\033[95m'
-COLOR_BOLD='\033[1m'
-COLOR_NONE='\033[0m' # No Color
-
-
-function log_error {
-  >&2 echo -n -e "${COLOR_BOLD}${COLOR_RED}"
-  >&2 echo "$@"
-  >&2 echo -n -e "${COLOR_NONE}"
-}
-
-function log_warning {
-  >&2 echo -n -e "${COLOR_ORANGE}"
-  >&2 echo "$@"
-  >&2 echo -n -e "${COLOR_NONE}"
-}
-
-function log_callout {
-  >&2 echo -n -e "${COLOR_LIGHTCYAN}"
-  >&2 echo "$@"
-  >&2 echo -n -e "${COLOR_NONE}"
-}
-
-function log_cmd {
-  >&2 echo -n -e "${COLOR_BLUE}"
-  >&2 echo "$@"
-  >&2 echo -n -e "${COLOR_NONE}"
-}
-
-function log_success {
-  >&2 echo -n -e "${COLOR_GREEN}"
-  >&2 echo "$@"
-  >&2 echo -n -e "${COLOR_NONE}"
-}
-
-function log_info {
-  >&2 echo -n -e "${COLOR_NONE}"
-  >&2 echo "$@"
-  >&2 echo -n -e "${COLOR_NONE}"
-}
-
-# From http://stackoverflow.com/a/12498485
-function relativePath {
-  # both $1 and $2 are absolute paths beginning with /
-  # returns relative path to $2 from $1
-  local source=$1
-  local target=$2
-
-  local commonPart=$source
-  local result=""
-
-  while [[ "${target#"$commonPart"}" == "${target}" ]]; do
-    # no match, means that candidate common part is not correct
-    # go up one level (reduce common part)
-    commonPart="$(dirname "$commonPart")"
-    # and record that we went back, with correct / handling
-    if [[ -z $result ]]; then
-      result=".."
-    else
-      result="../$result"
-    fi
-  done
-
-  if [[ $commonPart == "/" ]]; then
-    # special case for root (no common path)
-    result="$result/"
-  fi
-
-  # since we now have identified the common part,
-  # compute the non-common part
-  local forwardPart="${target#"$commonPart"}"
-
-  # and now stick all parts together
-  if [[ -n $result ]] && [[ -n $forwardPart ]]; then
-    result="$result$forwardPart"
-  elif [[ -n $forwardPart ]]; then
-    # extra slash removal
-    result="${forwardPart:1}"
-  fi
-
-  echo "$result"
-}
-
 ####   Discovery of files/packages within a go module #####
-
-# go_srcs_in_module [package]
-# returns list of all not-generated go sources in the current (dir) module.
-function go_srcs_in_module {
-  go list -f "{{with \$c:=.}}{{range \$f:=\$c.GoFiles  }}{{\$c.Dir}}/{{\$f}}{{\"\n\"}}{{end}}{{end}}" ./... | grep -vE "(\\.pb\\.go|\\.pb\\.gw.go)"
-}
 
 # pkgs_in_module [optional:package_pattern]
 # returns list of all packages in the current (dir) module.
@@ -164,7 +85,7 @@ function run_for_module {
 }
 
 function module_dirs() {
-  echo "api pkg raft client/pkg client/v2 client/v3 server etcdutl etcdctl tests ."
+  echo "api pkg client/pkg client/v3 server etcdutl etcdctl tests tools/mod tools/rw-heatmaps tools/testgrid-analysis cache ."
 }
 
 # maybe_run [cmd...] runs given command depending on the DRY_RUN flag.
@@ -176,13 +97,14 @@ function maybe_run() {
   fi
 }
 
+# modules
+# returns the list of all modules in the project, not including the tools,
+# as they are not considered to be added to the bill for materials.
 function modules() {
   modules=(
     "${ROOT_MODULE}/api/v3"
     "${ROOT_MODULE}/pkg/v3"
-    "${ROOT_MODULE}/raft/v3"
     "${ROOT_MODULE}/client/pkg/v3"
-    "${ROOT_MODULE}/client/v2"
     "${ROOT_MODULE}/client/v3"
     "${ROOT_MODULE}/server/v3"
     "${ROOT_MODULE}/etcdutl/v3"
@@ -192,28 +114,111 @@ function modules() {
   echo "${modules[@]}"
 }
 
-function modules_exp() {
-  for m in $(modules); do
-    echo -n "${m}/... "
+# Receives a reference to an array variable, and returns the workspace relative modules.
+function load_workspace_relative_modules() {
+  local -n _relative_modules=$1
+  while IFS= read -r line; do _relative_modules+=("$line"); done < <(
+    go work edit -json | jq -r '.Use[].DiskPath + "/..."'
+  )
+}
+
+# Receives a reference to an array variable, and returns the workspace relative modules, not
+# including the tools, as they are not considered to be added to the bill for materials.
+function load_workspace_relative_modules_for_bom() {
+  local -n relative_modules_for_bom=$1
+  local modules=()
+  load_workspace_relative_modules modules
+  for module in "${modules[@]}"; do
+    if [[ ! "${module}" =~ ^./tools ]]; then
+      relative_modules_for_bom+=("${module}")
+    fi
   done
+}
+
+#  run_for_all_workspace_modules [cmd]
+#  run given command across all workspace modules
+#  (unless the set is limited using ${PKG} or / ${USERMOD})
+function run_for_all_workspace_modules {
+  local pkg="${PKG:-./...}"
+  if [ -z "${USERMOD:-}" ]; then
+    local _modules=()
+    load_workspace_relative_modules _modules
+    run "$@" "${_modules[@]}"
+  else
+    run_for_module "${USERMOD}" "$@" "${pkg}" || return "$?"
+  fi
+}
+
+# run_for_workspace_modules [cmd]
+# run given command in each individual workspace module
+# (unless the set is limited using ${PKG} or / ${USERMOD})
+function run_for_workspace_modules {
+  local keep_going_module=${KEEP_GOING_MODULE:-false}
+  local fail_mod=false
+  local pkg="${PKG:-./...}"
+
+  if [ -z "${USERMOD:-}" ]; then
+    local _modules=()
+    load_workspace_relative_modules _modules
+    for module in "${_modules[@]}"; do
+      if ! run_for_module "${module%...}" "$@"; then
+        if [ "$keep_going_module" = false ]; then
+          log_error "There was a Failure in module ${module}, aborting..."
+          return 1
+        fi
+        log_error "There was a Failure in module ${module}, keep going..."
+        fail_mod=true
+      fi
+    done
+    if [ "$fail_mod" = true ]; then
+      return 1
+    fi
+  else
+    run_for_module "${USERMOD}" "$@" "${pkg}" || return "$?"
+  fi
 }
 
 #  run_for_modules [cmd]
 #  run given command across all modules and packages
 #  (unless the set is limited using ${PKG} or / ${USERMOD})
 function run_for_modules {
+  KEEP_GOING_MODULE=${KEEP_GOING_MODULE:-false}
   local pkg="${PKG:-./...}"
+  local fail_mod=false
   if [ -z "${USERMOD:-}" ]; then
     for m in $(module_dirs); do
-      run_for_module "${m}" "$@" "${pkg}" || return "$?"
+      if run_for_module "${m}" "$@" "${pkg}"; then
+        continue
+      else
+        if [ "$KEEP_GOING_MODULE" = false ]; then
+          log_error "There was a Failure in module ${m}, aborting..."
+          return 1
+        fi
+        log_error "There was a Failure in module ${m}, keep going..."
+        fail_mod=true
+      fi
     done
+    if [ "$fail_mod" = true ]; then
+      return 1
+    fi
   else
     run_for_module "${USERMOD}" "$@" "${pkg}" || return "$?"
   fi
 }
 
+function get_junit_filename_prefix {
+  local junit_report_dir="$1"
+  if [[ -z "${junit_report_dir}" ]]; then
+    echo ""
+    return
+  fi
+
+  mkdir -p "${junit_report_dir}"
+  mktemp --dry-run "${junit_report_dir}/junit_XXXXXXXXXX"
+}
+
 junitFilenamePrefix() {
-  if [[ -z "${JUNIT_REPORT_DIR}" ]]; then
+  if [[ -z "${JUNIT_REPORT_DIR:-}" ]]; then
     echo ""
     return
   fi
@@ -223,7 +228,7 @@ junitFilenamePrefix() {
 }
 
 function produce_junit_xmlreport {
-  local -r junit_filename_prefix=$1
+  local -r junit_filename_prefix=${1:-}
   if [[ -z "${junit_filename_prefix}" ]]; then
     return
   fi
@@ -233,7 +238,7 @@ function produce_junit_xmlreport {
 
   # Ensure that gotestsum is run without cross-compiling
   run_go_tool gotest.tools/gotestsum --junitfile "${junit_xml_filename}" --raw-command cat "${junit_filename_prefix}"*.stdout || exit 1
-  if [ "${VERBOSE}" != "1" ]; then
+  if [ "${VERBOSE:-}" != "1" ]; then
     rm "${junit_filename_prefix}"*.stdout
   fi
 
@@ -291,8 +296,9 @@ function go_test {
 
   junit_filename_prefix=$(junitFilenamePrefix)
 
-  if [ "${VERBOSE}" == "1" ]; then
-    goTestFlags="-v"
+  if [ "${VERBOSE:-}" == "1" ]; then
+    goTestFlags="-v "
+    goTestFlags+="-json "
   fi
 
   # Expanding patterns (like ./...) into list of packages
@@ -307,6 +313,10 @@ function go_test {
     fi
   fi
 
+  if [ "${mode}" == "fail_fast" ]; then
+    goTestFlags+="-failfast "
+  fi
+
   local failures=""
 
   # execution of tests against packages:
@@ -316,7 +326,7 @@ function go_test {
     additional_flags=$(${flags_for_package_func} ${pkg})
 
     # shellcheck disable=SC2206
-    local cmd=( go test ${goTestFlags} ${additional_flags} "$@" ${pkg} )
+    local cmd=( go test ${goTestFlags} ${additional_flags} ${pkg} "$@" )
 
     # shellcheck disable=SC2086
     if ! run env ${goTestEnv} ETCD_VERIFY="${ETCD_VERIFY}" "${cmd[@]}" | tee ${junit_filename_prefix:+"${junit_filename_prefix}.stdout"} | grep --binary-files=text "${go_test_grep_pattern}" ; then
@@ -336,6 +346,68 @@ function go_test {
   fi
 }
 
+# run_go_tests_expanding_packages [arguments to pass to go test]
+# Expands the packages in the list of arguments, i.e. ./... into a list of
+# packages for that given module. Then, it calls run_go_tests with the expanded
+# packages. Implements the legacy modes for non-parallel testing.
+function run_go_tests_expanding_packages {
+  local packages=()
+  local args=()
+  for arg in "$@"; do
+    if [[ "${arg}" =~ ^\./ || "${arg}" =~ ^go\.etcd\.io/etcd ]]; then
+      packages+=("${arg}")
+    else
+      args+=("${arg}")
+    fi
+  done
+
+  # Expanding patterns (like ./...) into list of packages
+  local unpacked_packages=()
+  while IFS='' read -r line; do unpacked_packages+=("$line"); done < <(
+    go list "${packages[@]}"
+  )
+
+  run_go_tests "${unpacked_packages[@]}" "${args[@]}"
+}
+
+# run_go_test [arguments to pass to go test]
+# The following environment variables affect how the tests run:
+#   - JUNIT_REPORT_DIR/ARTIFACTS: Enables collecting JUnit XML reports.
+#   - VERBOSE: Sets a verbose output.
+#
+# Example:
+#   KEEP_GOING_TESTS=true run_go_tests "./..." --short
+#
+# The function returns != 0 code in case of test failure.
+function run_go_tests {
+  local go_test_flags=()
+
+  # If JUNIT_REPORT_DIR is unset, and ARTIFACTS is set, then have them match.
+  local junit_report_dir=${JUNIT_REPORT_DIR:-${ARTIFACTS:-}}
+
+  local go_test_grep_pattern=".*"
+  if [[ -n "${junit_report_dir}" ]]; then
+    # Show only summary lines by matching lines like "status package/test"
+    go_test_grep_pattern="^[^[:space:]]\+[[:space:]]\+[^[:space:]]\+/[^[[:space:]]\+"
+  fi
+
+  if [[ -n "${junit_report_dir}" || "${VERBOSE:-}" == "1" ]]; then
+    go_test_flags+=("-v" "-json")
+  fi
+
+  local cmd=(go test "${go_test_flags[@]}" "$@")
+
+  local junit_filename_prefix
+  junit_filename_prefix=$(get_junit_filename_prefix "${junit_report_dir}")
+
+  if ! run env ETCD_VERIFY="${ETCD_VERIFY}" "${cmd[@]}" | tee ${junit_filename_prefix:+"${junit_filename_prefix}.stdout"} | grep --binary-files=text "${go_test_grep_pattern}" ; then
+    produce_junit_xmlreport "${junit_filename_prefix}"
+    return 2
+  fi
+
+  produce_junit_xmlreport "${junit_filename_prefix}"
+}
+
 #### Other ####
 
 # tool_exists [tool] [instruction]
@@ -353,7 +425,8 @@ function tool_exists {
   fi
 }
 
-# tool_get_bin [tool] - returns absolute path to a tool binary (or returns error)
+# tool_get_bin [tool] - returns absolute path to a tool binary (or returns error).
+# This function is only used to run commands that are managed by tools/mod.
 function tool_get_bin {
   local tool="$1"
   local pkg_part="$1"
@@ -385,7 +458,7 @@ function tool_pkg_dir {
 # tool_get_bin [tool]
 function run_go_tool {
   local cmdbin
-  if ! cmdbin=$(GOARCH="" tool_get_bin "${1}"); then
+  if ! cmdbin=$(GOARCH="" GOOS="" tool_get_bin "${1}"); then
     log_warning "Failed to install tool '${1}'"
     return 2
   fi
@@ -393,15 +466,15 @@ function run_go_tool {
   GOARCH="" run "${cmdbin}" "$@" || return 2
 }
 
-# assert_no_git_modifications fails if there are any uncommited changes.
+# assert_no_git_modifications fails if there are any uncommitted changes.
 function assert_no_git_modifications {
   log_callout "Making sure everything is committed."
   if ! git diff --cached --exit-code; then
-    log_error "Found staged by uncommited changes. Do commit/stash your changes first."
+    log_error "Found staged by uncommitted changes. Do commit/stash your changes first."
     return 2
   fi
   if ! git diff  --exit-code; then
-    log_error "Found unstaged and uncommited changes. Do commit/stash your changes first."
+    log_error "Found unstaged and uncommitted changes. Do commit/stash your changes first."
     return 2
   fi
 }
@@ -411,14 +484,16 @@ function assert_no_git_modifications {
 #  - no differencing commits in relation to the origin/$branch
 function git_assert_branch_in_sync {
   local branch
-  branch=$(run git rev-parse --abbrev-ref HEAD)
   # TODO: When git 2.22 popular, change to:
   # branch=$(git branch --show-current)
+  branch=$(run git rev-parse --abbrev-ref HEAD)
+  log_callout "Verify the current branch '${branch}' is clean"
   if [[ $(run git status --porcelain --untracked-files=no) ]]; then
     log_error "The workspace in '$(pwd)' for branch: ${branch} has uncommitted changes"
     log_error "Consider cleaning up / renaming this directory or (cd $(pwd) && git reset --hard)"
     return 2
   fi
+  log_callout "Verify the current branch '${branch}' is in sync with the 'origin/${branch}'"
   if [ -n "${branch}" ]; then
     ref_local=$(run git rev-parse "${branch}")
     ref_origin=$(run git rev-parse "origin/${branch}")
@@ -431,3 +506,27 @@ function git_assert_branch_in_sync {
     log_warning "Cannot verify consistency with the origin, as git is on detached branch."
   fi
 }
+
+# The version present in the .go-verion is the default version that test and build scripts will use.
+# However, it is possible to control the version that should be used with the help of env vars:
+# - FORCE_HOST_GO: if set to a non-empty value, use the version of go installed in system's $PATH.
+# - GO_VERSION: desired version of go to be used, might differ from what is present in .go-version.
+#               If empty, the value defaults to the version in .go-version.
+function determine_go_version {
+  # Borrowing from how Kubernetes does this:
+  #  https://github.com/kubernetes/kubernetes/blob/17854f0e0a153b06f9d0db096e2cd8ab2fa89c11/hack/lib/golang.sh#L510-L520
+  #
+  # default GO_VERSION to content of .go-version
+  GO_VERSION="${GO_VERSION:-"$(cat "${ETCD_ROOT_DIR}/.go-version")"}"
+  if [ "${GOTOOLCHAIN:-auto}" != 'auto' ]; then
+    # no-op, just respect GOTOOLCHAIN
+    :
+  elif [ -n "${FORCE_HOST_GO:-}" ]; then
+    export GOTOOLCHAIN='local'
+  else
+    GOTOOLCHAIN="go${GO_VERSION}"
+    export GOTOOLCHAIN
+  fi
+}
+
+determine_go_version

@@ -1,3 +1,17 @@
+// Copyright 2022 The etcd Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package v3discovery
 
 import (
@@ -6,13 +20,13 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jonboulle/clockwork"
+	"go.uber.org/zap/zaptest"
+
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/client/v3"
-	"go.uber.org/zap/zaptest"
-
-	"github.com/jonboulle/clockwork"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 // fakeKVForClusterSize is used to test getClusterSize.
@@ -21,7 +35,7 @@ type fakeKVForClusterSize struct {
 	clusterSizeStr string
 }
 
-// We only need to overwrite the method `Get`.
+// Get when we only need to overwrite the method `Get`.
 func (fkv *fakeKVForClusterSize) Get(ctx context.Context, key string, opts ...clientv3.OpOption) (*clientv3.GetResponse, error) {
 	if fkv.clusterSizeStr == "" {
 		// cluster size isn't configured in this case.
@@ -77,7 +91,7 @@ func TestGetClusterSize(t *testing.T) {
 				clusterToken: "fakeToken",
 			}
 
-			if cs, err := d.getClusterSize(); err != tc.expectedErr {
+			if cs, err := d.getClusterSize(); !errors.Is(err, tc.expectedErr) {
 				t.Errorf("Unexpected error, expected: %v got: %v", tc.expectedErr, err)
 			} else {
 				if err == nil && cs != tc.expectedSize {
@@ -94,7 +108,7 @@ type fakeKVForClusterMembers struct {
 	members []memberInfo
 }
 
-// We only need to overwrite method `Get`.
+// Get when we only need to overwrite method `Get`.
 func (fkv *fakeKVForClusterMembers) Get(ctx context.Context, key string, opts ...clientv3.OpOption) (*clientv3.GetResponse, error) {
 	kvs := memberInfoToKeyValues(fkv.members)
 
@@ -216,7 +230,7 @@ type fakeKVForCheckCluster struct {
 	getMembersRetries int
 }
 
-// We only need to overwrite method `Get`.
+// Get when we only need to overwrite method `Get`.
 func (fkv *fakeKVForCheckCluster) Get(ctx context.Context, key string, opts ...clientv3.OpOption) (*clientv3.GetResponse, error) {
 	clusterSizeKey := fmt.Sprintf("/_etcd/registry/%s/_config/size", fkv.token)
 	clusterMembersKey := fmt.Sprintf("/_etcd/registry/%s/members", fkv.token)
@@ -234,8 +248,8 @@ func (fkv *fakeKVForCheckCluster) Get(ctx context.Context, key string, opts ...c
 				},
 			},
 		}, nil
-
-	} else if key == clusterMembersKey {
+	}
+	if key == clusterMembersKey {
 		if fkv.getMembersRetries > 0 {
 			fkv.getMembersRetries--
 			// discovery client should retry on error.
@@ -249,10 +263,9 @@ func (fkv *fakeKVForCheckCluster) Get(ctx context.Context, key string, opts ...c
 			},
 			Kvs: kvs,
 		}, nil
-	} else {
-		fkv.t.Errorf("unexpected key: %s", key)
-		return nil, fmt.Errorf("unexpected key: %s", key)
 	}
+	fkv.t.Errorf("unexpected key: %s", key)
+	return nil, fmt.Errorf("unexpected key: %s", key)
 }
 
 func TestCheckCluster(t *testing.T) {
@@ -313,35 +326,35 @@ func TestCheckCluster(t *testing.T) {
 
 	cases := []struct {
 		name              string
-		memberId          types.ID
+		memberID          types.ID
 		getSizeRetries    int
 		getMembersRetries int
 		expectedError     error
 	}{
 		{
 			name:              "no retries",
-			memberId:          101,
+			memberID:          101,
 			getSizeRetries:    0,
 			getMembersRetries: 0,
 			expectedError:     nil,
 		},
 		{
 			name:              "2 retries for getClusterSize",
-			memberId:          102,
+			memberID:          102,
 			getSizeRetries:    2,
 			getMembersRetries: 0,
 			expectedError:     nil,
 		},
 		{
 			name:              "2 retries for getClusterMembers",
-			memberId:          103,
+			memberID:          103,
 			getSizeRetries:    0,
 			getMembersRetries: 2,
 			expectedError:     nil,
 		},
 		{
 			name:              "error due to cluster full",
-			memberId:          104,
+			memberID:          104,
 			getSizeRetries:    0,
 			getMembersRetries: 0,
 			expectedError:     ErrFullCluster,
@@ -369,12 +382,12 @@ func TestCheckCluster(t *testing.T) {
 				},
 				cfg:          &DiscoveryConfig{},
 				clusterToken: "fakeToken",
-				memberId:     tc.memberId,
+				memberID:     tc.memberID,
 				clock:        clockwork.NewRealClock(),
 			}
 
 			clsInfo, _, _, err := d.checkCluster()
-			if err != tc.expectedError {
+			if !errors.Is(err, tc.expectedError) {
 				t.Errorf("Unexpected error, expected: %v, got: %v", tc.expectedError, err)
 			}
 
@@ -406,7 +419,7 @@ type fakeKVForRegisterSelf struct {
 	retries          int
 }
 
-// We only need to overwrite method `Put`.
+// Put when we only need to overwrite method `Put`.
 func (fkv *fakeKVForRegisterSelf) Put(ctx context.Context, key string, val string, opts ...clientv3.OpOption) (*clientv3.PutResponse, error) {
 	if key != fkv.expectedRegKey {
 		fkv.t.Errorf("unexpected register key, expected: %s, got: %s", fkv.expectedRegKey, key)
@@ -429,7 +442,7 @@ func TestRegisterSelf(t *testing.T) {
 	cases := []struct {
 		name             string
 		token            string
-		memberId         types.ID
+		memberID         types.ID
 		expectedRegKey   string
 		expectedRegValue string
 		retries          int // when retries > 0, then return an error on Put request.
@@ -437,7 +450,7 @@ func TestRegisterSelf(t *testing.T) {
 		{
 			name:             "no retry with token1",
 			token:            "token1",
-			memberId:         101,
+			memberID:         101,
 			expectedRegKey:   "/_etcd/registry/token1/members/" + types.ID(101).String(),
 			expectedRegValue: "infra=http://127.0.0.1:2380",
 			retries:          0,
@@ -445,7 +458,7 @@ func TestRegisterSelf(t *testing.T) {
 		{
 			name:             "no retry with token2",
 			token:            "token2",
-			memberId:         102,
+			memberID:         102,
 			expectedRegKey:   "/_etcd/registry/token2/members/" + types.ID(102).String(),
 			expectedRegValue: "infra=http://127.0.0.1:2380",
 			retries:          0,
@@ -453,7 +466,7 @@ func TestRegisterSelf(t *testing.T) {
 		{
 			name:             "2 retries",
 			token:            "token3",
-			memberId:         103,
+			memberID:         103,
 			expectedRegKey:   "/_etcd/registry/token3/members/" + types.ID(103).String(),
 			expectedRegValue: "infra=http://127.0.0.1:2380",
 			retries:          2,
@@ -474,7 +487,7 @@ func TestRegisterSelf(t *testing.T) {
 			d := &discovery{
 				lg:           lg,
 				clusterToken: tc.token,
-				memberId:     tc.memberId,
+				memberID:     tc.memberID,
 				cfg:          &DiscoveryConfig{},
 				c: &clientv3.Client{
 					KV: fkv,
@@ -483,7 +496,7 @@ func TestRegisterSelf(t *testing.T) {
 			}
 
 			if err := d.registerSelf(tc.expectedRegValue); err != nil {
-				t.Errorf("Error occuring on register member self: %v", err)
+				t.Errorf("Error occurring on register member self: %v", err)
 			}
 
 			if fkv.retries != 0 {
@@ -501,7 +514,7 @@ type fakeWatcherForWaitPeers struct {
 	members []memberInfo
 }
 
-// We only need to overwrite method `Watch`.
+// Watch we only need to overwrite method `Watch`.
 func (fw *fakeWatcherForWaitPeers) Watch(ctx context.Context, key string, opts ...clientv3.OpOption) clientv3.WatchChan {
 	expectedWatchKey := fmt.Sprintf("/_etcd/registry/%s/members", fw.token)
 	if key != expectedWatchKey {
@@ -695,7 +708,7 @@ func TestGetInitClusterStr(t *testing.T) {
 					peerURLsMap: "infra2=http://192.168.0.102:2380",
 				},
 				{
-					peerURLsMap: "infra3=http://192.168.0.103", //not host:port
+					peerURLsMap: "infra3=http://192.168.0.103", // not host:port
 				},
 			},
 			clusterSize:    2,
@@ -711,7 +724,7 @@ func TestGetInitClusterStr(t *testing.T) {
 			}
 
 			retStr, err := clsInfo.getInitClusterStr(tc.clusterSize)
-			if err != tc.expectedError {
+			if !errors.Is(err, tc.expectedError) {
 				t.Errorf("Unexpected error, expected: %v, got: %v", tc.expectedError, err)
 			}
 

@@ -16,10 +16,11 @@ package flags
 
 import (
 	"flag"
-	"os"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -30,36 +31,28 @@ func TestSetFlagsFromEnv(t *testing.T) {
 	fs.String("c", "", "")
 	fs.Parse([]string{})
 
-	os.Clearenv()
 	// flags should be settable using env vars
-	os.Setenv("ETCD_A", "foo")
+	t.Setenv("ETCD_A", "foo")
 	// and command-line flags
-	if err := fs.Set("b", "bar"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, fs.Set("b", "bar"))
 
 	// first verify that flags are as expected before reading the env
 	for f, want := range map[string]string{
 		"a": "",
 		"b": "bar",
 	} {
-		if got := fs.Lookup(f).Value.String(); got != want {
-			t.Fatalf("flag %q=%q, want %q", f, got, want)
-		}
+		got := fs.Lookup(f).Value.String()
+		require.Equalf(t, want, got, "flag %q=%q, want %q", f, got, want)
 	}
 
 	// now read the env and verify flags were updated as expected
-	err := SetFlagsFromEnv(zaptest.NewLogger(t), "ETCD", fs)
-	if err != nil {
-		t.Errorf("err=%v, want nil", err)
-	}
+	require.NoError(t, SetFlagsFromEnv(zaptest.NewLogger(t), "ETCD", fs))
 	for f, want := range map[string]string{
 		"a": "foo",
 		"b": "bar",
 	} {
-		if got := fs.Lookup(f).Value.String(); got != want {
-			t.Errorf("flag %q=%q, want %q", f, got, want)
-		}
+		got := fs.Lookup(f).Value.String()
+		assert.Equalf(t, want, got, "flag %q=%q, want %q", f, got, want)
 	}
 }
 
@@ -67,10 +60,8 @@ func TestSetFlagsFromEnvBad(t *testing.T) {
 	// now verify that an error is propagated
 	fs := flag.NewFlagSet("testing", flag.ExitOnError)
 	fs.Int("x", 0, "")
-	os.Setenv("ETCD_X", "not_a_number")
-	if err := SetFlagsFromEnv(zaptest.NewLogger(t), "ETCD", fs); err == nil {
-		t.Errorf("err=nil, want != nil")
-	}
+	t.Setenv("ETCD_X", "not_a_number")
+	assert.Error(t, SetFlagsFromEnv(zaptest.NewLogger(t), "ETCD", fs))
 }
 
 func TestSetFlagsFromEnvParsingError(t *testing.T) {
@@ -78,10 +69,7 @@ func TestSetFlagsFromEnvParsingError(t *testing.T) {
 	var tickMs uint
 	fs.UintVar(&tickMs, "heartbeat-interval", 0, "Time (in milliseconds) of a heartbeat interval.")
 
-	if oerr := os.Setenv("ETCD_HEARTBEAT_INTERVAL", "100 # ms"); oerr != nil {
-		t.Fatal(oerr)
-	}
-	defer os.Unsetenv("ETCD_HEARTBEAT_INTERVAL")
+	t.Setenv("ETCD_HEARTBEAT_INTERVAL", "100 # ms")
 
 	err := SetFlagsFromEnv(zaptest.NewLogger(t), "ETCD", fs)
 	for _, v := range []string{"invalid syntax", "parse error"} {
@@ -90,7 +78,5 @@ func TestSetFlagsFromEnvParsingError(t *testing.T) {
 			break
 		}
 	}
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
+	require.NoErrorf(t, err, "unexpected error %v", err)
 }

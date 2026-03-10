@@ -16,12 +16,11 @@ package ordering
 
 import (
 	"context"
-	gContext "context"
 	"sync"
 	"testing"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/client/v3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 type mockKV struct {
@@ -29,7 +28,7 @@ type mockKV struct {
 	response clientv3.OpResponse
 }
 
-func (kv *mockKV) Do(ctx gContext.Context, op clientv3.Op) (clientv3.OpResponse, error) {
+func (kv *mockKV) Do(ctx context.Context, op clientv3.Op) (clientv3.OpResponse, error) {
 	return kv.response, nil
 }
 
@@ -77,7 +76,7 @@ func TestKvOrdering(t *testing.T) {
 			tt.prevRev,
 			sync.RWMutex{},
 		}
-		res, err := kv.Get(context.TODO(), "mockKey")
+		res, err := kv.Get(t.Context(), "mockKey")
 		if err != nil {
 			t.Errorf("#%d: expected response %+v, got error %+v", i, tt.response, err)
 		}
@@ -132,9 +131,9 @@ func TestTxnOrdering(t *testing.T) {
 			sync.RWMutex{},
 		}
 		txn := &txnOrdering{
-			kv.Txn(context.Background()),
+			kv.Txn(t.Context()),
 			kv,
-			context.Background(),
+			t.Context(),
 			sync.Mutex{},
 			[]clientv3.Cmp{},
 			[]clientv3.Op{},

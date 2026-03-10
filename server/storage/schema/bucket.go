@@ -54,6 +54,8 @@ var (
 	AuthRoles = backend.Bucket(bucket{id: 22, name: authRolesBucketName, safeRangeBucket: false})
 
 	Test = backend.Bucket(bucket{id: 100, name: testBucketName, safeRangeBucket: false})
+
+	AllBuckets = []backend.Bucket{Key, Meta, Lease, Alarm, Cluster, Members, MembersRemoved, Auth, AuthUsers, AuthRoles}
 )
 
 type bucket struct {
@@ -89,8 +91,8 @@ func DefaultIgnores(bucket, key []byte) bool {
 	// consistent index & term might be changed due to v2 internal sync, which
 	// is not controllable by the user.
 	// storage version might change after wal snapshot and is not controller by user.
-	return bytes.Compare(bucket, Meta.Name()) == 0 &&
-		(bytes.Compare(key, MetaTermKeyName) == 0 || bytes.Compare(key, MetaConsistentIndexKeyName) == 0 || bytes.Compare(key, MetaStorageVersionName) == 0)
+	return bytes.Equal(bucket, Meta.Name()) &&
+		(bytes.Equal(key, MetaTermKeyName) || bytes.Equal(key, MetaConsistentIndexKeyName) || bytes.Equal(key, MetaStorageVersionName))
 }
 
 func BackendMemberKey(id types.ID) []byte {

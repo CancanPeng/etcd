@@ -15,18 +15,19 @@
 package transport
 
 import (
+	"errors"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestReadWriteTimeoutDialer(t *testing.T) {
 	stop := make(chan struct{})
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("unexpected listen error: %v", err)
-	}
+	require.NoErrorf(t, err, "unexpected listen error")
 	defer func() {
 		stop <- struct{}{}
 	}()
@@ -38,9 +39,7 @@ func TestReadWriteTimeoutDialer(t *testing.T) {
 		rdtimeoutd: 10 * time.Millisecond,
 	}
 	conn, err := d.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("unexpected dial error: %v", err)
-	}
+	require.NoErrorf(t, err, "unexpected dial error")
 	defer conn.Close()
 
 	// fill the socket buffer
@@ -59,14 +58,13 @@ func TestReadWriteTimeoutDialer(t *testing.T) {
 		t.Fatal("wait timeout")
 	}
 
-	if operr, ok := err.(*net.OpError); !ok || operr.Op != "write" || !operr.Timeout() {
+	var operr *net.OpError
+	if !errors.As(err, &operr) || operr.Op != "write" || !operr.Timeout() {
 		t.Errorf("err = %v, want write i/o timeout error", err)
 	}
 
 	conn, err = d.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("unexpected dial error: %v", err)
-	}
+	require.NoErrorf(t, err, "unexpected dial error")
 	defer conn.Close()
 
 	buf := make([]byte, 10)
@@ -81,8 +79,8 @@ func TestReadWriteTimeoutDialer(t *testing.T) {
 		t.Fatal("wait timeout")
 	}
 
-	if operr, ok := err.(*net.OpError); !ok || operr.Op != "read" || !operr.Timeout() {
-		t.Errorf("err = %v, want write i/o timeout error", err)
+	if !errors.As(err, &operr) || operr.Op != "read" || !operr.Timeout() {
+		t.Errorf("err = %v, want read i/o timeout error", err)
 	}
 }
 
@@ -93,6 +91,7 @@ type testBlockingServer struct {
 }
 
 func (ts *testBlockingServer) Start(t *testing.T) {
+	t.Helper()
 	for i := 0; i < ts.n; i++ {
 		conn, err := ts.ln.Accept()
 		if err != nil {

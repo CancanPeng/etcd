@@ -20,12 +20,14 @@ import (
 	"testing"
 	"time"
 
-	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
-	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	"go.etcd.io/etcd/tests/v3/framework/integration"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 // TestV3MaintenanceDefragmentInflightRange ensures inflight range requests
@@ -37,11 +39,10 @@ func TestV3MaintenanceDefragmentInflightRange(t *testing.T) {
 
 	cli := clus.RandClient()
 	kvc := integration.ToGRPC(cli).KV
-	if _, err := kvc.Put(context.Background(), &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")}); err != nil {
-		t.Fatal(err)
-	}
+	_, err := kvc.Put(t.Context(), &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")})
+	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 
 	donec := make(chan struct{})
 	go func() {
@@ -50,7 +51,7 @@ func TestV3MaintenanceDefragmentInflightRange(t *testing.T) {
 	}()
 
 	mvc := integration.ToGRPC(cli).Maintenance
-	mvc.Defragment(context.Background(), &pb.DefragmentRequest{})
+	mvc.Defragment(t.Context(), &pb.DefragmentRequest{})
 	cancel()
 
 	<-donec
@@ -68,11 +69,10 @@ func TestV3KVInflightRangeRequests(t *testing.T) {
 	cli := clus.RandClient()
 	kvc := integration.ToGRPC(cli).KV
 
-	if _, err := kvc.Put(context.Background(), &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")}); err != nil {
-		t.Fatal(err)
-	}
+	_, err := kvc.Put(t.Context(), &pb.PutRequest{Key: []byte("foo"), Value: []byte("bar")})
+	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 
 	reqN := 10 // use 500+ for fast machine
 	var wg sync.WaitGroup

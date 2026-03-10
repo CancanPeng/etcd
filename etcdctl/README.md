@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD003 MD004 MD007 MD012 MD022 MD024 MD040 -->
+
 etcdctl
 ========
 
@@ -119,15 +121,31 @@ RPC: Range
 
 - print-value-only -- print only value when used with write-out=simple
 
-- consistency -- Linearizable(l) or Serializable(s)
+- consistency -- Linearizable(l) or Serializable(s), defaults to Linearizable(l).
 
 - from-key -- Get keys that are greater than or equal to the given key using byte compare
 
 - keys-only -- Get only the keys
 
+- max-create-revision -- restrict results to kvs with create revision lower or equal than the supplied revision
+
+- min-create-revision -- restrict results to kvs with create revision greater or equal than the supplied revision
+
+- max-mod-revision -- restrict results to kvs with modified revision lower or equal than the supplied revision
+
+- min-mod-revision -- restrict results to kvs with modified revision greater or equal than the supplied revision
+
 #### Output
 
+Prints the data in format below,
+
+```
 \<key\>\n\<value\>\n\<next_key\>\n\<next_value\>...
+```
+
+Note serializable requests are better for lower latency requirement, but
+stale data might be returned if serializable option (`--consistency=s`)
+is specified.
 
 #### Examples
 
@@ -268,6 +286,7 @@ RPC: Txn
 - interactive -- input transaction with interactive prompting.
 
 #### Input Format
+
 ```ebnf
 <Txn> ::= <CMP>* "\n" <THEN> "\n" <ELSE> "\n"
 <CMP> ::= (<CMPCREATE>|<CMPMOD>|<CMPVAL>|<CMPVER>|<CMPLEASE>) "\n"
@@ -294,6 +313,7 @@ RPC: Txn
 #### Examples
 
 txn in interactive mode:
+
 ```bash
 ./etcdctl txn -i
 # compares:
@@ -314,6 +334,7 @@ put key2 "some extra key"
 ```
 
 txn in non-interactive mode:
+
 ```bash
 ./etcdctl txn <<<'mod("key1") > "0"
 
@@ -369,6 +390,7 @@ RPC: Compact
 Prints the compacted revision.
 
 #### Example
+
 ```bash
 ./etcdctl compaction 1234
 # compacted revision 1234
@@ -376,7 +398,7 @@ Prints the compacted revision.
 
 ### WATCH [options] [key or prefix] [range_end] [--] [exec-command arg1 arg2 ...]
 
-Watch watches events stream on keys or prefixes, [key or prefix, range_end) if range_end is given. The watch command runs until it encounters an error or is terminated by the user.  If range_end is given, it must be lexicographically greater than key or "\x00".
+Watch watches events stream on keys or prefixes, [key or prefix, range_end) if range_end is given. The watch command runs until it encounters an error or is terminated by the user. If range_end is given, it must be lexicographically greater than key or "\x00".
 
 RPC: Watch
 
@@ -627,6 +649,7 @@ RPC: LeaseKeepAlive
 Prints a message for every keep alive sent or prints a message indicating the lease is gone.
 
 #### Example
+
 ```bash
 ./etcdctl lease keep-alive 32695410dcc0ca0
 # lease 32695410dcc0ca0 keepalived with TTL(100)
@@ -711,9 +734,19 @@ MEMBER LIST prints the member details for all members associated with an etcd cl
 
 RPC: MemberList
 
+#### Options
+
+- consistency -- Linearizable(l) or Serializable(s), defaults to Linearizable(l).
+
 #### Output
 
 Prints a humanized table of the member IDs, statuses, names, peer addresses, and client addresses.
+
+Note serializable requests are better for lower latency requirement, but
+stale member list might be returned if serializable option (`--consistency=s`)
+is specified. In some situations users may want to use serializable requests.
+For example, when adding a new member to a one-node cluster, it's reasonable
+and safe to use serializable request before the new added member gets started.
 
 #### Examples
 
@@ -837,28 +870,73 @@ Prints a line of JSON encoding each endpoint URL and KV history hash.
 Get the hash for the default endpoint:
 
 ```bash
-./etcdctl endpoint hashkv
-# 127.0.0.1:2379, 1084519789
+./etcdctl endpoint hashkv --cluster
+http://127.0.0.1:2379, 2064120424, 13
+http://127.0.0.1:22379, 2064120424, 13
+http://127.0.0.1:32379, 2064120424, 13
 ```
 
 Get the status for the default endpoint as JSON:
 
 ```bash
-./etcdctl -w json endpoint hashkv
-# [{"Endpoint":"127.0.0.1:2379","Hash":{"header":{"cluster_id":14841639068965178418,"member_id":10276657743932975437,"revision":1,"raft_term":3},"hash":1084519789,"compact_revision":-1}}]
+./etcdctl endpoint hash --cluster -w json | jq
+[
+  {
+    "Endpoint": "http://127.0.0.1:2379",
+    "HashKV": {
+      "header": {
+        "cluster_id": 17237436991929494000,
+        "member_id": 9372538179322590000,
+        "revision": 13,
+        "raft_term": 2
+      },
+      "hash": 2064120424,
+      "compact_revision": -1,
+      "hash_revision": 13
+    }
+  },
+  {
+    "Endpoint": "http://127.0.0.1:22379",
+    "HashKV": {
+      "header": {
+        "cluster_id": 17237436991929494000,
+        "member_id": 10501334649042878000,
+        "revision": 13,
+        "raft_term": 2
+      },
+      "hash": 2064120424,
+      "compact_revision": -1,
+      "hash_revision": 13
+    }
+  },
+  {
+    "Endpoint": "http://127.0.0.1:32379",
+    "HashKV": {
+      "header": {
+        "cluster_id": 17237436991929494000,
+        "member_id": 18249187646912140000,
+        "revision": 13,
+        "raft_term": 2
+      },
+      "hash": 2064120424,
+      "compact_revision": -1,
+      "hash_revision": 13
+    }
+  }
+]
 ```
 
 Get the status for all endpoints in the cluster associated with the default endpoint:
 
 ```bash
-./etcdctl -w table endpoint --cluster hashkv
-+------------------------+------------+
-|        ENDPOINT        |    HASH    |
-+------------------------+------------+
-| http://127.0.0.1:2379  | 1084519789 |
-| http://127.0.0.1:22379 | 1084519789 |
-| http://127.0.0.1:32379 | 1084519789 |
-+------------------------+------------+
+$ ./etcdctl endpoint hash --cluster -w table
++------------------------+-----------+---------------+
+|        ENDPOINT        |   HASH    | HASH REVISION |
++------------------------+-----------+---------------+
+|  http://127.0.0.1:2379 | 784522900 |            16 |
+| http://127.0.0.1:22379 | 784522900 |            16 |
+| http://127.0.0.1:32379 | 784522900 |            16 |
++------------------------+-----------+---------------+
 ```
 
 ### ALARM \<subcommand\>
@@ -921,7 +999,6 @@ DEFRAG defragments the backend database file for a set of given endpoints while 
 
 **Note that defragmentation request does not get replicated over cluster. That is, the request is only applied to the local node. Specify all members in `--endpoints` flag or `--cluster` flag to automatically find all cluster members.**
 
-
 #### Output
 
 For each endpoints, prints a message indicating whether the endpoint was successfully defragmented.
@@ -962,6 +1039,7 @@ The backend snapshot is written to the given file path.
 #### Example
 
 Save a snapshot to "snapshot.db":
+
 ```
 ./etcdctl snapshot save snapshot.db
 ```
@@ -969,7 +1047,6 @@ Save a snapshot to "snapshot.db":
 ### SNAPSHOT RESTORE [options] \<filename\>
 
 Removed in v3.6. Use `etcdutl snapshot restore` instead.
-
 
 ### SNAPSHOT STATUS \<filename\>
 
@@ -1010,6 +1087,7 @@ New members will refuse joining cluster with cluster version newer than theirs, 
 Downgrade commands allow cluster administrator to force cluster version to be lowered to previous minor version, thus allowing to downgrade the cluster.
 
 Downgrade should be executed in stages:
+
 1. Verify that cluster is ready to be downgraded by running `etcdctl downgrade validate <TARGET_VERSION>`
 2. Start the downgrade process by running `etcdctl downgrade enable <TARGET_VERSION>`
 3. For each cluster member:
@@ -1050,7 +1128,7 @@ DOWNGRADE ENABLE starts a downgrade action to cluster.
 Downgrade enable success, cluster version 3.6
 ```
 
-### DOWNGRADE CANCEL \<TARGET_VERSION\>
+### DOWNGRADE CANCEL
 
 DOWNGRADE CANCEL cancels the ongoing downgrade action to cluster.
 
@@ -1060,6 +1138,43 @@ DOWNGRADE CANCEL cancels the ongoing downgrade action to cluster.
 ./etcdctl downgrade cancel
 Downgrade cancel success, cluster version 3.5
 ```
+
+### DIAGNOSIS
+
+`etcdctl diagnosis [flags]` - Collects and analyzes troubleshooting data from a running etcd cluster.
+
+The `diagnosis` command gathers a concise set of diagnostic details from each cluster member by performing several checks, including:
+
+  * **Membership checks**: Verifies the cluster membership information.
+  * **Endpoint status**: Retrieves the status of each endpoint.
+  * **Serializable and linearizable reads**: Performs read operations to validate data consistency.
+  * **Metrics snapshot**: Collects a small snapshot of key metrics.
+
+#### Flags
+
+- `--cluster`: use all endpoints discovered from the cluster member list.
+- `--etcd-storage-quota-bytes`: expected etcd storage quota in bytes (value passed to etcd with `--quota-backend-bytes`).
+- `-o, --output`: optional file path to write the JSON report; by default the report is written to stdout. Logs are written to stderr.
+
+Global flags (like `--endpoints`, TLS, auth, and timeouts) are shared with other `etcdctl` commands. See `etcdctl options` for the full list.
+
+#### Examples
+
+To perform analysis of a running etcd cluster, you can use the following command. This will collect and analyze data from all specified endpoints.
+
+```bash
+etcdctl diagnosis --endpoints=https://10.0.1.10:2379,https://10.0.1.11:2379,https://10.0.1.12:2379 \
+  --cacert ./ca.crt --key ./etcd-diagnosis.key --cert ./etcd-diagnosis.crt
+
+# Use cluster-discovered endpoints
+etcdctl diagnosis --cluster
+
+# Write report to a file (logs still go to stderr)
+etcdctl diagnosis -o report.json
+```
+
+
+Example output: see [ctlv3/command/diagnosis/examples/etcd_diagnosis_report.json](ctlv3/command/diagnosis/examples/etcd_diagnosis_report.json)
 
 ## Concurrency commands
 
@@ -1094,6 +1209,7 @@ Acquire lock and execute `echo lock acquired`:
 ```
 
 Acquire lock and execute `etcdctl put` command
+
 ```bash
 ./etcdctl lock mylock ./etcdctl put foo bar
 # OK
@@ -1133,7 +1249,7 @@ Whenever a leader is elected, its proposal is given as output.
 
 ELECT returns a zero exit code only if it is terminated by a signal and can revoke its candidacy or leadership, if any.
 
-If a candidate is abnormally terminated, election rogress may be delayed by up to the default lease length of 60 seconds.
+If a candidate is abnormally terminated, election progress may be delayed by up to the default lease length of 60 seconds.
 
 ## Authentication commands
 
@@ -1466,6 +1582,8 @@ RPC: UserRevokeRole
 
 - dest-insecure-transport -- Disable transport security for client connections
 
+- max-txn-ops -- Maximum number of operations permitted in a transaction during syncing updates
+
 #### Output
 
 The approximate total number of keys transferred to the destination cluster, updated every 30 seconds.
@@ -1479,7 +1597,6 @@ The approximate total number of keys transferred to the destination cluster, upd
 ```
 
 [mirror]: ./doc/mirror_maker.md
-
 
 ### VERSION
 
@@ -1504,6 +1621,23 @@ CHECK provides commands for checking properties of the etcd cluster.
 ### CHECK PERF [options]
 
 CHECK PERF checks the performance of the etcd cluster for 60 seconds. Running the `check perf` often can create a large keyspace history which can be auto compacted and defragmented using the `--auto-compact` and `--auto-defrag` options as described below.
+
+Notice that different workload models use different configurations in terms of number of clients and throughput. Here is the configuration for each load:
+
+| Load | Number of clients | Number of put requests (requests/sec) |
+|---------|------|---------|
+| Small   | 50   | 10000   |
+| Medium  | 200  | 100000  |
+| Large   | 500  | 1000000 |
+| xLarge  | 1000 | 3000000 |
+
+The test checks for the following conditions:
+
+- The throughput should be at least 90% of the issued request
+- All the requests should be done in less than 500 ms
+- The standard deviation of the requests should be less than 100 ms
+
+Hence, a workload model may work while another one might fail.
 
 RPC: CheckPerf
 
@@ -1618,7 +1752,4 @@ backward compatibility for `JSON` format and the format in non-interactive mode.
 
 [etcd]: https://github.com/coreos/etcd
 [READMEv2]: READMEv2.md
-[v2key]: ../store/node_extern.go#L28-L37
-[v3key]: ../api/mvccpb/kv.proto#L12-L29
 [etcdrpc]: ../api/etcdserverpb/rpc.proto
-[storagerpc]: ../api/mvccpb/kv.proto

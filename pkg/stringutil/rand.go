@@ -16,7 +16,6 @@ package stringutil
 
 import (
 	"math/rand"
-	"time"
 )
 
 // UniqueStrings returns a slice of randomly generated unique strings.
@@ -24,7 +23,7 @@ func UniqueStrings(slen uint, n int) (ss []string) {
 	exist := make(map[string]struct{})
 	ss = make([]string, 0, n)
 	for len(ss) < n {
-		s := randString(slen)
+		s := RandString(slen)
 		if _, ok := exist[s]; !ok {
 			ss = append(ss, s)
 			exist[s] = struct{}{}
@@ -37,15 +36,14 @@ func UniqueStrings(slen uint, n int) (ss []string) {
 func RandomStrings(slen uint, n int) (ss []string) {
 	ss = make([]string, 0, n)
 	for i := 0; i < n; i++ {
-		ss = append(ss, randString(slen))
+		ss = append(ss, RandString(slen))
 	}
 	return ss
 }
 
 const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-func randString(l uint) string {
-	rand.Seed(time.Now().UnixNano())
+func RandString(l uint) string {
 	s := make([]byte, l)
 	for i := 0; i < int(l); i++ {
 		s[i] = chars[rand.Intn(len(chars))]

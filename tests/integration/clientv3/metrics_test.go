@@ -16,7 +16,8 @@ package clientv3test
 
 import (
 	"bufio"
-	"context"
+	"bytes"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -25,16 +26,19 @@ import (
 	"testing"
 	"time"
 
-	grpcprom "github.com/grpc-ecosystem/go-grpc-prometheus"
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.etcd.io/etcd/client/pkg/v3/transport"
-	"go.etcd.io/etcd/client/v3"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+
+	"go.etcd.io/etcd/client/pkg/v3/transport"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 func TestV3ClientMetrics(t *testing.T) {
-	integration2.BeforeTest(t)
+	integration.BeforeTest(t)
 
 	var (
 		addr = "localhost:27989"
@@ -58,41 +62,40 @@ func TestV3ClientMetrics(t *testing.T) {
 	// listen for all Prometheus metrics
 
 	go func() {
-		var err error
-
 		defer close(donec)
 
-		err = srv.Serve(ln)
-		if err != nil && !transport.IsClosedConnError(err) {
-			t.Errorf("Err serving http requests: %v", err)
+		serr := srv.Serve(ln)
+		if serr != nil && !transport.IsClosedConnError(serr) {
+			t.Errorf("Err serving http requests: %v", serr)
 		}
 	}()
 
 	url := "unix://" + addr + "/metrics"
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 1})
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
 	defer clus.Terminate(t)
 
+	clientMetrics := grpcprom.NewClientMetrics()
+	prometheus.Register(clientMetrics)
+
 	cfg := clientv3.Config{
-		Endpoints: []string{clus.Members[0].GRPCURL()},
+		Endpoints: []string{clus.Members[0].GRPCURL},
 		DialOptions: []grpc.DialOption{
-			grpc.WithUnaryInterceptor(grpcprom.UnaryClientInterceptor),
-			grpc.WithStreamInterceptor(grpcprom.StreamClientInterceptor),
+			grpc.WithUnaryInterceptor(clientMetrics.UnaryClientInterceptor()),
+			grpc.WithStreamInterceptor(clientMetrics.StreamClientInterceptor()),
 		},
 	}
-	cli, cerr := integration2.NewClient(t, cfg)
-	if cerr != nil {
-		t.Fatal(cerr)
-	}
+	cli, cerr := integration.NewClient(t, cfg)
+	require.NoError(t, cerr)
 	defer cli.Close()
 
-	wc := cli.Watch(context.Background(), "foo")
+	wc := cli.Watch(t.Context(), "foo")
 
 	wBefore := sumCountersForMetricAndLabels(t, url, "grpc_client_msg_received_total", "Watch", "bidi_stream")
 
 	pBefore := sumCountersForMetricAndLabels(t, url, "grpc_client_started_total", "Put", "unary")
 
-	_, err = cli.Put(context.Background(), "foo", "bar")
+	_, err = cli.Put(t.Context(), "foo", "bar")
 	if err != nil {
 		t.Errorf("Error putting value in key store")
 	}
@@ -145,6 +148,24 @@ func sumCountersForMetricAndLabels(t *testing.T, url string, metricName string, 
 }
 
 func getHTTPBodyAsLines(t *testing.T, url string) []string {
+	data := getHTTPBodyAsBytes(t, url)
+
+	reader := bufio.NewReader(bytes.NewReader(data))
+	var lines []string
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatalf("error reading: %v", err)
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func getHTTPBodyAsBytes(t *testing.T, url string) []byte {
 	cfgtls := transport.TLSInfo{}
 	tr, err := transport.NewTransport(cfgtls, time.Second)
 	if err != nil {
@@ -160,20 +181,10 @@ func getHTTPBodyAsLines(t *testing.T, url string) []string {
 	if err != nil {
 		t.Fatalf("Error fetching: %v", err)
 	}
-
-	reader := bufio.NewReader(resp.Body)
-	lines := []string{}
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			} else {
-				t.Fatalf("error reading: %v", err)
-			}
-		}
-		lines = append(lines, line)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Error reading http body: %v", err)
 	}
-	resp.Body.Close()
-	return lines
+	return body
 }

@@ -1,16 +1,34 @@
 syntax = "proto3";
 package etcdserverpb;
 
-import "gogoproto/gogo.proto";
 import "etcd/api/mvccpb/kv.proto";
 import "etcd/api/authpb/auth.proto";
 import "etcd/api/versionpb/version.proto";
 
 // for grpc-gateway
 import "google/api/annotations.proto";
+import "protoc-gen-openapiv2/options/annotations.proto";
 
-option (gogoproto.marshaler_all) = true;
-option (gogoproto.unmarshaler_all) = true;
+option go_package = "go.etcd.io/etcd/api/v3/etcdserverpb";
+
+option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_swagger) = {
+  security_definitions: {
+    security: {
+      key: "ApiKey";
+      value: {
+        type: TYPE_API_KEY;
+        in: IN_HEADER;
+        name: "Authorization";
+      }
+    }
+  }
+  security: {
+    security_requirement: {
+      key: "ApiKey";
+      value: {};
+    }
+  }
+};
 
 service KV {
   // Range gets the keys in the range from the key-value store.
@@ -218,7 +236,7 @@ service Maintenance {
   // It only iterates "key" bucket in backend storage.
   rpc HashKV(HashKVRequest) returns (HashKVResponse) {
       option (google.api.http) = {
-        post: "/v3/maintenance/hash"
+        post: "/v3/maintenance/hashkv"
         body: "*"
     };
   }
@@ -323,7 +341,7 @@ service Auth {
     };
   }
 
-  // UserGrant grants a role to a specified user.
+  // UserGrantRole grants a role to a specified user.
   rpc UserGrantRole(AuthUserGrantRoleRequest) returns (AuthUserGrantRoleResponse) {
       option (google.api.http) = {
         post: "/v3/auth/user/grant"
@@ -485,7 +503,9 @@ message RangeResponse {
   repeated mvccpb.KeyValue kvs = 2;
   // more indicates if there are more keys to return in the requested range.
   bool more = 3;
-  // count is set to the number of keys within the range when requested.
+  // count is set to the actual number of keys within the range when requested.
+  // Unlike Kvs, it is unaffected by limits and filters (e.g., Min/Max, Create/Modify, Revisions)
+  // and reflects the full count within the specified range.
   int64 count = 4;
 }
 
@@ -695,6 +715,8 @@ message HashKVResponse {
   uint32 hash = 2;
   // compact_revision is the compacted revision of key-value store when hash begins.
   int64 compact_revision = 3;
+  // hash_revision is the revision up to which the hash is calculated.
+  int64 hash_revision = 4 [(versionpb.etcd_version_field)="3.6"];
 }
 
 message HashResponse {
@@ -812,7 +834,8 @@ message WatchResponse {
   // All events sent to the created watcher will attach with the same watch_id.
   bool created = 3;
 
-  // canceled is set to true if the response is for a cancel watch request.
+  // canceled is set to true if the response is for a cancel watch request
+  // or if the start_revision has already been compacted.
   // No further events will be sent to the canceled watcher.
   bool canceled = 4;
 
@@ -1133,6 +1156,16 @@ message DowngradeResponse {
   string version = 2;
 }
 
+// DowngradeVersionTestRequest is used for test only. The version in
+// this request will be read as the WAL record version.If the downgrade
+// target version is less than this version, then the downgrade(online)
+// or migration(offline) isn't safe, so shouldn't be allowed.
+message DowngradeVersionTestRequest {
+  option (versionpb.etcd_version_msg) = "3.6";
+
+  string ver = 1;
+}
+
 message StatusRequest {
   option (versionpb.etcd_version_msg) = "3.0";
 }
@@ -1159,8 +1192,19 @@ message StatusResponse {
   int64 dbSizeInUse = 9 [(versionpb.etcd_version_field)="3.4"];
   // isLearner indicates if the member is raft learner.
   bool isLearner = 10 [(versionpb.etcd_version_field)="3.4"];
-  // storageVersion is the version of the db file. It might be get updated with delay in relationship to the target cluster version.
+  // storageVersion is the version of the db file. It might be updated with delay in relationship to the target cluster version.
   string storageVersion = 11 [(versionpb.etcd_version_field)="3.6"];
+  // dbSizeQuota is the configured etcd storage quota in bytes (the value passed to etcd instance by flag --quota-backend-bytes)
+  int64 dbSizeQuota = 12 [(versionpb.etcd_version_field)="3.6"];
+  // downgradeInfo indicates if there is downgrade process.
+  DowngradeInfo downgradeInfo = 13 [(versionpb.etcd_version_field)="3.6"];
+}
+
+message DowngradeInfo {
+	// enabled indicates whether the cluster is enabled to downgrade.
+  bool enabled = 1;
+	// targetVersion is the target downgrade version.
+  string targetVersion = 2;
 }
 
 message AuthEnableRequest {

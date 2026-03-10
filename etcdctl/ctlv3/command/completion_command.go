@@ -65,7 +65,7 @@ PowerShell:
 `,
 		DisableFlagsInUseLine: true,
 		ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
-		Args:                  cobra.ExactValidArgs(1),
+		Args:                  cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 		Run: func(cmd *cobra.Command, args []string) {
 			switch args[0] {
 			case "bash":
@@ -78,6 +78,7 @@ PowerShell:
 				cmd.Root().GenPowerShellCompletionWithDesc(os.Stdout)
 			}
 		},
+		GroupID: groupUtilityID,
 	}
 
 	return cmd

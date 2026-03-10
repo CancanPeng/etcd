@@ -22,11 +22,13 @@ import (
 	"path/filepath"
 
 	"go.uber.org/zap"
+
+	"go.etcd.io/etcd/client/pkg/v3/verify"
 )
 
 const (
 	// PrivateFileMode grants owner to read/write a file.
-	PrivateFileMode = 0600
+	PrivateFileMode = 0o600
 )
 
 // IsDirWriteable checks if dir is writable by writing and removing a file
@@ -45,8 +47,9 @@ func IsDirWriteable(dir string) error {
 // TouchDirAll is similar to os.MkdirAll. It creates directories with 0700 permission if any directory
 // does not exists. TouchDirAll also ensures the given directory is writable.
 func TouchDirAll(lg *zap.Logger, dir string) error {
+	verify.Assert(lg != nil, "nil log isn't allowed")
 	// If path is already a directory, MkdirAll does nothing and returns nil, so,
-	// first check if dir exist with an expected permission mode.
+	// first check if dir exists with an expected permission mode.
 	if Exist(dir) {
 		err := CheckDirPermission(dir, PrivateDirMode)
 		if err != nil {
@@ -122,7 +125,7 @@ func CheckDirPermission(dir string, perm os.FileMode) error {
 	if !Exist(dir) {
 		return fmt.Errorf("directory %q empty, cannot check permission", dir)
 	}
-	//check the existing permission on the directory
+	// check the existing permission on the directory
 	dirInfo, err := os.Stat(dir)
 	if err != nil {
 		return err
@@ -157,7 +160,6 @@ func RemoveMatchFile(lg *zap.Logger, dir string, matchFunc func(fileName string)
 				lg.Error("remove file failed",
 					zap.String("file", file),
 					zap.Error(err))
-				continue
 			}
 		}
 	}

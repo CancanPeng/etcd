@@ -23,12 +23,12 @@ import (
 	"os"
 	"time"
 
-	v3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/pkg/v3/report"
-
+	"github.com/cheggaaa/pb/v3"
 	"github.com/spf13/cobra"
 	"golang.org/x/time/rate"
-	"gopkg.in/cheggaaa/pb.v1"
+
+	v3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/pkg/v3/report"
 )
 
 // mixeTxnCmd represents the mixedTxn command
@@ -69,7 +69,7 @@ type request struct {
 	op      v3.Op
 }
 
-func mixedTxnFunc(cmd *cobra.Command, args []string) {
+func mixedTxnFunc(cmd *cobra.Command, _ []string) {
 	if keySpaceSize <= 0 {
 		fmt.Fprintf(os.Stderr, "expected positive --key-space-size, got (%v)", keySpaceSize)
 		os.Exit(1)
@@ -93,11 +93,10 @@ func mixedTxnFunc(cmd *cobra.Command, args []string) {
 	k, v := make([]byte, keySize), string(mustRandBytes(valSize))
 
 	bar = pb.New(mixedTxnTotal)
-	bar.Format("Bom !")
 	bar.Start()
 
-	reportRead := newReport()
-	reportWrite := newReport()
+	reportRead := newReport(cmd.Name() + "-read")
+	reportWrite := newReport(cmd.Name() + "-write")
 	for i := range clients {
 		wg.Add(1)
 		go func(c *v3.Client) {

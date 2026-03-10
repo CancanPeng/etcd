@@ -21,20 +21,24 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"go.etcd.io/etcd/client/v3"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 )
 
 var (
-	memberPeerURLs string
-	isLearner      bool
+	memberPeerURLs    string
+	isLearner         bool
+	memberConsistency string
 )
 
 // NewMemberCommand returns the cobra command for "member".
 func NewMemberCommand() *cobra.Command {
 	mc := &cobra.Command{
-		Use:   "member <subcommand>",
-		Short: "Membership related commands",
+		Use:     "member <subcommand>",
+		Short:   "Membership related commands. Use `etcdctl member --help` to see subcommands",
+		Long:    "Membership related commands",
+		GroupID: groupClusterMaintenanceID,
 	}
 
 	mc.AddCommand(NewMemberAddCommand())
@@ -99,6 +103,8 @@ The items in the lists are ID, Status, Name, Peer Addrs, Client Addrs, Is Learne
 		Run: memberListCommandFunc,
 	}
 
+	cc.Flags().StringVar(&memberConsistency, "consistency", "l", "Linearizable(l) or Serializable(s)")
+
 	return cc
 }
 
@@ -157,7 +163,7 @@ func memberAddCommandFunc(cmd *cobra.Command, args []string) {
 	display.MemberAdd(*resp)
 
 	if _, ok := (display).(*simplePrinter); ok {
-		conf := []string{}
+		var conf []string
 		for _, memb := range resp.Members {
 			for _, u := range memb.PeerURLs {
 				n := memb.Name
@@ -172,7 +178,7 @@ func memberAddCommandFunc(cmd *cobra.Command, args []string) {
 		fmt.Printf("ETCD_NAME=%q\n", newMemberName)
 		fmt.Printf("ETCD_INITIAL_CLUSTER=%q\n", strings.Join(conf, ","))
 		fmt.Printf("ETCD_INITIAL_ADVERTISE_PEER_URLS=%q\n", memberPeerURLs)
-		fmt.Printf("ETCD_INITIAL_CLUSTER_STATE=\"existing\"\n")
+		fmt.Print("ETCD_INITIAL_CLUSTER_STATE=\"existing\"\n")
 	}
 }
 
@@ -184,7 +190,7 @@ func memberRemoveCommandFunc(cmd *cobra.Command, args []string) {
 
 	id, err := strconv.ParseUint(args[0], 16, 64)
 	if err != nil {
-		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%v), expecting ID in Hex", err))
+		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%w), expecting ID in Hex", err))
 	}
 
 	ctx, cancel := commandCtx(cmd)
@@ -204,7 +210,7 @@ func memberUpdateCommandFunc(cmd *cobra.Command, args []string) {
 
 	id, err := strconv.ParseUint(args[0], 16, 64)
 	if err != nil {
-		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%v), expecting ID in Hex", err))
+		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%w), expecting ID in Hex", err))
 	}
 
 	if len(memberPeerURLs) == 0 {
@@ -225,8 +231,12 @@ func memberUpdateCommandFunc(cmd *cobra.Command, args []string) {
 
 // memberListCommandFunc executes the "member list" command.
 func memberListCommandFunc(cmd *cobra.Command, args []string) {
+	var opts []clientv3.OpOption
+	if IsSerializable(memberConsistency) {
+		opts = append(opts, clientv3.WithSerializable())
+	}
 	ctx, cancel := commandCtx(cmd)
-	resp, err := mustClientFromCmd(cmd).MemberList(ctx)
+	resp, err := mustClientFromCmd(cmd).MemberList(ctx, opts...)
 	cancel()
 	if err != nil {
 		cobrautl.ExitWithError(cobrautl.ExitError, err)
@@ -243,7 +253,7 @@ func memberPromoteCommandFunc(cmd *cobra.Command, args []string) {
 
 	id, err := strconv.ParseUint(args[0], 16, 64)
 	if err != nil {
-		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%v), expecting ID in Hex", err))
+		cobrautl.ExitWithError(cobrautl.ExitBadArgs, fmt.Errorf("bad member ID arg (%w), expecting ID in Hex", err))
 	}
 
 	ctx, cancel := commandCtx(cmd)

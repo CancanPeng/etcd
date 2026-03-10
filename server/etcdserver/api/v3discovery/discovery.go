@@ -19,7 +19,6 @@ package v3discovery
 import (
 	"context"
 	"errors"
-
 	"math"
 	"path"
 	"sort"
@@ -27,11 +26,11 @@ import (
 	"strings"
 	"time"
 
-	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/client/v3"
-
 	"github.com/jonboulle/clockwork"
 	"go.uber.org/zap"
+
+	"go.etcd.io/etcd/client/pkg/v3/types"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 const (
@@ -60,7 +59,7 @@ type DiscoveryConfig struct {
 type memberInfo struct {
 	// peerRegKey is the key used by the member when registering in the
 	// discovery service.
-	// Format: "/_etcd/registry/<ClusterToken>/members/<memberId>".
+	// Format: "/_etcd/registry/<ClusterToken>/members/<memberID>".
 	peerRegKey string
 	// peerURLsMap format: "peerName=peerURLs", i.e., "member1=http://127.0.0.1:2380".
 	peerURLsMap string
@@ -89,9 +88,9 @@ func getMemberKeyPrefix(clusterToken string) string {
 	return path.Join(getClusterKeyPrefix(clusterToken), "members")
 }
 
-// key format for each member: "/_etcd/registry/<ClusterToken>/members/<memberId>".
-func getMemberKey(cluster, memberId string) string {
-	return path.Join(getMemberKeyPrefix(cluster), memberId)
+// key format for each member: "/_etcd/registry/<ClusterToken>/members/<memberID>".
+func getMemberKey(cluster, memberID string) string {
+	return path.Join(getMemberKeyPrefix(cluster), memberID)
 }
 
 // GetCluster will connect to the discovery service at the given endpoints and
@@ -156,7 +155,7 @@ func JoinCluster(lg *zap.Logger, cfg *DiscoveryConfig, id types.ID, config strin
 type discovery struct {
 	lg           *zap.Logger
 	clusterToken string
-	memberId     types.ID
+	memberID     types.ID
 	c            *clientv3.Client
 	retries      uint
 
@@ -183,7 +182,7 @@ func newDiscovery(lg *zap.Logger, dcfg *DiscoveryConfig, id types.ID) (*discover
 	return &discovery{
 		lg:           lg,
 		clusterToken: dcfg.Token,
-		memberId:     id,
+		memberID:     id,
 		c:            c,
 		cfg:          dcfg,
 		clock:        clockwork.NewRealClock(),
@@ -193,7 +192,7 @@ func newDiscovery(lg *zap.Logger, dcfg *DiscoveryConfig, id types.ID) (*discover
 func (d *discovery) getCluster() (string, error) {
 	cls, clusterSize, rev, err := d.checkCluster()
 	if err != nil {
-		if err == ErrFullCluster {
+		if errors.Is(err, ErrFullCluster) {
 			return cls.getInitClusterStr(clusterSize)
 		}
 		return "", err
@@ -212,7 +211,7 @@ func (d *discovery) joinCluster(config string) (string, error) {
 		return "", err
 	}
 
-	if err := d.registerSelf(config); err != nil {
+	if err = d.registerSelf(config); err != nil {
 		return "", err
 	}
 
@@ -304,7 +303,7 @@ func (d *discovery) checkClusterRetry() (*clusterInfo, int, int64, error) {
 func (d *discovery) checkCluster() (*clusterInfo, int, int64, error) {
 	clusterSize, err := d.getClusterSize()
 	if err != nil {
-		if err == ErrSizeNotFound || err == ErrBadSizeKey {
+		if errors.Is(err, ErrSizeNotFound) || errors.Is(err, ErrBadSizeKey) {
 			return nil, 0, 0, err
 		}
 
@@ -318,10 +317,10 @@ func (d *discovery) checkCluster() (*clusterInfo, int, int64, error) {
 	d.retries = 0
 
 	// find self position
-	memberSelfId := getMemberKey(d.clusterToken, d.memberId.String())
+	memberSelfID := getMemberKey(d.clusterToken, d.memberID.String())
 	idx := 0
 	for _, m := range cls.members {
-		if m.peerRegKey == memberSelfId {
+		if m.peerRegKey == memberSelfID {
 			break
 		}
 		if idx >= clusterSize-1 {
@@ -342,7 +341,7 @@ func (d *discovery) registerSelfRetry(contents string) error {
 
 func (d *discovery) registerSelf(contents string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), d.cfg.RequestTimeout)
-	memberKey := getMemberKey(d.clusterToken, d.memberId.String())
+	memberKey := getMemberKey(d.clusterToken, d.memberID.String())
 	_, err := d.c.Put(ctx, memberKey, contents)
 	cancel()
 
@@ -437,6 +436,7 @@ func (cls *clusterInfo) Len() int { return len(cls.members) }
 func (cls *clusterInfo) Less(i, j int) bool {
 	return cls.members[i].createRev < cls.members[j].createRev
 }
+
 func (cls *clusterInfo) Swap(i, j int) {
 	cls.members[i], cls.members[j] = cls.members[j], cls.members[i]
 }
@@ -450,7 +450,7 @@ func (cls *clusterInfo) add(memberKey, memberValue string, rev int64) error {
 		return errors.New("invalid peer registry key")
 	}
 
-	if strings.IndexRune(memberValue, '=') == -1 {
+	if !strings.ContainsRune(memberValue, '=') {
 		// It must be in the format "member1=http://127.0.0.1:2380".
 		return errors.New("invalid peer info returned from discovery service")
 	}

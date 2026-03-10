@@ -15,14 +15,16 @@
 package storage
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/coreos/go-semver/semver"
-	"go.etcd.io/etcd/raft/v3/raftpb"
+	"go.uber.org/zap"
+
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
 	"go.etcd.io/etcd/server/v3/storage/wal"
 	"go.etcd.io/etcd/server/v3/storage/wal/walpb"
-	"go.uber.org/zap"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 type Storage interface {
@@ -59,8 +61,8 @@ func (st *storage) SaveSnap(snap raftpb.Snapshot) error {
 	st.mux.RLock()
 	defer st.mux.RUnlock()
 	walsnap := walpb.Snapshot{
-		Index:     snap.Metadata.Index,
-		Term:      snap.Metadata.Term,
+		Index:     new(snap.Metadata.Index),
+		Term:      new(snap.Metadata.Term),
 		ConfState: &snap.Metadata.ConfState,
 	}
 	// save the snapshot file before writing the snapshot to the wal.
@@ -111,12 +113,12 @@ func (st *storage) MinimalEtcdVersion() *semver.Version {
 	walsnap := walpb.Snapshot{}
 
 	sn, err := st.s.Load()
-	if err != nil && err != snap.ErrNoSnapshot {
+	if err != nil && !errors.Is(err, snap.ErrNoSnapshot) {
 		panic(err)
 	}
 	if sn != nil {
-		walsnap.Index = sn.Metadata.Index
-		walsnap.Term = sn.Metadata.Term
+		walsnap.Index = new(sn.Metadata.Index)
+		walsnap.Term = new(sn.Metadata.Term)
 		walsnap.ConfState = &sn.Metadata.ConfState
 	}
 	w, err := st.w.Reopen(st.lg, walsnap)

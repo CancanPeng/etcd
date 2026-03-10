@@ -126,7 +126,11 @@ func (s *simplePrinter) Alarm(resp v3.AlarmResponse) {
 }
 
 func (s *simplePrinter) MemberAdd(r v3.MemberAddResponse) {
-	fmt.Printf("Member %16x added to cluster %16x\n", r.Member.ID, r.Header.ClusterId)
+	asLearner := " "
+	if r.Member.IsLearner {
+		asLearner = " as learner "
+	}
+	fmt.Printf("Member %16x added%sto cluster %16x\n", r.Member.ID, asLearner, r.Header.ClusterId)
 }
 
 func (s *simplePrinter) MemberRemove(id uint64, r v3.MemberRemoveResponse) {
@@ -179,9 +183,11 @@ func (s *simplePrinter) MoveLeader(leader, target uint64, r v3.MoveLeaderRespons
 func (s *simplePrinter) DowngradeValidate(r v3.DowngradeResponse) {
 	fmt.Printf("Downgrade validate success, cluster version %s\n", r.Version)
 }
+
 func (s *simplePrinter) DowngradeEnable(r v3.DowngradeResponse) {
 	fmt.Printf("Downgrade enable success, cluster version %s\n", r.Version)
 }
+
 func (s *simplePrinter) DowngradeCancel(r v3.DowngradeResponse) {
 	fmt.Printf("Downgrade cancel success, cluster version %s\n", r.Version)
 }
@@ -213,13 +219,13 @@ func (s *simplePrinter) RoleGet(role string, r v3.AuthRoleGetResponse) {
 		if v3.GetPrefixRangeEnd(sKey) == sRangeEnd && len(sKey) > 0 {
 			fmt.Printf(" (prefix %s)", sKey)
 		}
-		fmt.Printf("\n")
+		fmt.Print("\n")
 	}
 
 	for _, perm := range r.Perm {
 		if perm.PermType == v3.PermRead || perm.PermType == v3.PermReadWrite {
 			if len(perm.RangeEnd) == 0 {
-				fmt.Printf("\t%s\n", string(perm.Key))
+				fmt.Printf("\t%s\n", perm.Key)
 			} else {
 				printRange((*v3.Permission)(perm))
 			}
@@ -229,7 +235,7 @@ func (s *simplePrinter) RoleGet(role string, r v3.AuthRoleGetResponse) {
 	for _, perm := range r.Perm {
 		if perm.PermType == v3.PermWrite || perm.PermType == v3.PermReadWrite {
 			if len(perm.RangeEnd) == 0 {
-				fmt.Printf("\t%s\n", string(perm.Key))
+				fmt.Printf("\t%s\n", perm.Key)
 			} else {
 				printRange((*v3.Permission)(perm))
 			}
@@ -269,11 +275,11 @@ func (s *simplePrinter) UserAdd(name string, r v3.AuthUserAddResponse) {
 
 func (s *simplePrinter) UserGet(name string, r v3.AuthUserGetResponse) {
 	fmt.Printf("User: %s\n", name)
-	fmt.Printf("Roles:")
+	fmt.Print("Roles:")
 	for _, role := range r.Roles {
 		fmt.Printf(" %s", role)
 	}
-	fmt.Printf("\n")
+	fmt.Print("\n")
 }
 
 func (s *simplePrinter) UserChangePassword(v3.AuthUserChangePasswordResponse) {

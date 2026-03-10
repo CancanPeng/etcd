@@ -15,32 +15,38 @@
 package etcdserver
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	errorspkg "errors"
 	"strconv"
 	"time"
+
+	"github.com/gogo/protobuf/proto"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/pkg/v3/traceutil"
-	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/server/v3/auth"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
+	apply2 "go.etcd.io/etcd/server/v3/etcdserver/apply"
+	"go.etcd.io/etcd/server/v3/etcdserver/errors"
+	"go.etcd.io/etcd/server/v3/etcdserver/txn"
+	"go.etcd.io/etcd/server/v3/features"
 	"go.etcd.io/etcd/server/v3/lease"
 	"go.etcd.io/etcd/server/v3/lease/leasehttp"
 	"go.etcd.io/etcd/server/v3/storage/mvcc"
-
-	"github.com/gogo/protobuf/proto"
-	"go.uber.org/zap"
-	"golang.org/x/crypto/bcrypt"
+	"go.etcd.io/raft/v3"
 )
 
 const (
 	// In the health case, there might be a small gap (10s of entries) between
 	// the applied index and committed index.
-	// However, if the committed entries are very heavy to apply, the gap might grow.
+	// However, if the committed entries are very heavy to toApply, the gap might grow.
 	// We should stop accepting new proposals if the gap growing to a certain point.
 	maxGapBetweenApplyAndCommitIndex = 5000
 	traceThreshold                   = 100 * time.Millisecond
@@ -60,9 +66,9 @@ type RaftKV interface {
 }
 
 type Lessor interface {
-	// LeaseGrant sends LeaseGrant request to raft and apply it after committed.
+	// LeaseGrant sends LeaseGrant request to raft and toApply it after committed.
 	LeaseGrant(ctx context.Context, r *pb.LeaseGrantRequest) (*pb.LeaseGrantResponse, error)
-	// LeaseRevoke sends LeaseRevoke request to raft and apply it after committed.
+	// LeaseRevoke sends LeaseRevoke request to raft and toApply it after committed.
 	LeaseRevoke(ctx context.Context, r *pb.LeaseRevokeRequest) (*pb.LeaseRevokeResponse, error)
 
 	// LeaseRenew renews the lease with given ID. The renewed TTL is returned. Or an error
@@ -97,17 +103,26 @@ type Authenticator interface {
 }
 
 func (s *EtcdServer) Range(ctx context.Context, r *pb.RangeRequest) (*pb.RangeResponse, error) {
-	trace := traceutil.New("range",
-		s.Logger(),
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "range", trace.WithAttributes(
+		attribute.String("range_begin", string(r.GetKey())),
+		attribute.String("range_end", string(r.GetRangeEnd())),
+		attribute.Int64("rev", r.GetRevision()),
+		attribute.Int64("limit", r.GetLimit()),
+		attribute.Bool("count_only", r.GetCountOnly()),
+		attribute.Bool("keys_only", r.GetKeysOnly()),
+	))
+	defer span.End()
+
+	ctx, trace := traceutil.EnsureTrace(ctx, s.Logger(), "range",
 		traceutil.Field{Key: "range_begin", Value: string(r.Key)},
 		traceutil.Field{Key: "range_end", Value: string(r.RangeEnd)},
 	)
-	ctx = context.WithValue(ctx, traceutil.TraceKey, trace)
 
 	var resp *pb.RangeResponse
 	var err error
 	defer func(start time.Time) {
-		warnOfExpensiveReadOnlyRangeRequest(s.Logger(), s.Cfg.WarningApplyDuration, start, r, resp, err)
+		txn.WarnOfExpensiveReadOnlyRangeRequest(s.Logger(), s.Cfg.WarningApplyDuration, start, r, resp, err)
 		if resp != nil {
 			trace.AddField(
 				traceutil.Field{Key: "response_count", Value: len(resp.Kvs)},
@@ -115,6 +130,8 @@ func (s *EtcdServer) Range(ctx context.Context, r *pb.RangeRequest) (*pb.RangeRe
 			)
 		}
 		trace.LogIfLong(traceThreshold)
+		success := err == nil
+		requestDurationSec.WithLabelValues("Range", strconv.FormatBool(success)).Observe(time.Since(start).Seconds())
 	}(time.Now())
 
 	if !r.Serializable {
@@ -128,7 +145,7 @@ func (s *EtcdServer) Range(ctx context.Context, r *pb.RangeRequest) (*pb.RangeRe
 		return s.authStore.IsRangePermitted(ai, r.Key, r.RangeEnd)
 	}
 
-	get := func() { resp, err = s.applyV3Base.Range(ctx, nil, r) }
+	get := func() { resp, _, err = txn.Range(ctx, s.Logger(), s.KV(), r) }
 	if serr := s.doSerialize(ctx, chk, get); serr != nil {
 		err = serr
 		return nil, err
@@ -137,7 +154,13 @@ func (s *EtcdServer) Range(ctx context.Context, r *pb.RangeRequest) (*pb.RangeRe
 }
 
 func (s *EtcdServer) Put(ctx context.Context, r *pb.PutRequest) (*pb.PutResponse, error) {
-	ctx = context.WithValue(ctx, traceutil.StartTimeKey, time.Now())
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "put", trace.WithAttributes(
+		attribute.String("key", string(r.GetKey())),
+	))
+	defer span.End()
+
+	ctx = context.WithValue(ctx, traceutil.StartTimeKey{}, time.Now())
 	resp, err := s.raftRequest(ctx, pb.InternalRaftRequest{Put: r})
 	if err != nil {
 		return nil, err
@@ -146,6 +169,13 @@ func (s *EtcdServer) Put(ctx context.Context, r *pb.PutRequest) (*pb.PutResponse
 }
 
 func (s *EtcdServer) DeleteRange(ctx context.Context, r *pb.DeleteRangeRequest) (*pb.DeleteRangeResponse, error) {
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "delete_range", trace.WithAttributes(
+		attribute.String("range_begin", string(r.GetKey())),
+		attribute.String("range_end", string(r.GetRangeEnd())),
+	))
+	defer span.End()
+
 	resp, err := s.raftRequest(ctx, pb.InternalRaftRequest{DeleteRange: r})
 	if err != nil {
 		return nil, err
@@ -154,13 +184,26 @@ func (s *EtcdServer) DeleteRange(ctx context.Context, r *pb.DeleteRangeRequest) 
 }
 
 func (s *EtcdServer) Txn(ctx context.Context, r *pb.TxnRequest) (*pb.TxnResponse, error) {
-	if isTxnReadonly(r) {
-		trace := traceutil.New("transaction",
-			s.Logger(),
-			traceutil.Field{Key: "read_only", Value: true},
-		)
-		ctx = context.WithValue(ctx, traceutil.TraceKey, trace)
-		if !isTxnSerializable(r) {
+	readOnly := txn.IsTxnReadonly(r)
+
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "txn", trace.WithAttributes(
+		attribute.String("compare_first_key", firstCompareKey(r.GetCompare())),
+		attribute.String("success_first_key", firstOpKey(r.GetSuccess())),
+		attribute.String("success_first_type", firstOpType(r.GetSuccess())),
+		attribute.Int64("success_first_lease", firstOpLease(r.GetSuccess())),
+		attribute.Int("compare_len", len(r.GetCompare())),
+		attribute.Int("success_len", len(r.GetSuccess())),
+		attribute.Int("failure_len", len(r.GetFailure())),
+		attribute.Bool("read_only", readOnly),
+	))
+	defer span.End()
+
+	ctx, trace := traceutil.EnsureTrace(ctx, s.Logger(), "transaction",
+		traceutil.Field{Key: "read_only", Value: readOnly},
+	)
+	if readOnly {
+		if !txn.IsTxnSerializable(r) {
 			err := s.linearizableReadNotify(ctx)
 			trace.Step("agreement among raft nodes before linearized reading")
 			if err != nil {
@@ -170,22 +213,26 @@ func (s *EtcdServer) Txn(ctx context.Context, r *pb.TxnRequest) (*pb.TxnResponse
 		var resp *pb.TxnResponse
 		var err error
 		chk := func(ai *auth.AuthInfo) error {
-			return checkTxnAuth(s.authStore, ai, r)
+			return txn.CheckTxnAuth(s.authStore, ai, r)
 		}
 
 		defer func(start time.Time) {
-			warnOfExpensiveReadOnlyTxnRequest(s.Logger(), s.Cfg.WarningApplyDuration, start, r, resp, err)
+			txn.WarnOfExpensiveReadOnlyTxnRequest(s.Logger(), s.Cfg.WarningApplyDuration, start, r, resp, err)
 			trace.LogIfLong(traceThreshold)
+			success := err == nil
+			requestDurationSec.WithLabelValues("ReadonlyTxn", strconv.FormatBool(success)).Observe(time.Since(start).Seconds())
 		}(time.Now())
 
-		get := func() { resp, _, err = s.applyV3Base.Txn(ctx, r) }
+		get := func() {
+			resp, _, err = txn.Txn(ctx, s.Logger(), r, s.Cfg.ServerFeatureGate.Enabled(features.TxnModeWriteWithSharedBuffer), s.KV(), s.lessor)
+		}
 		if serr := s.doSerialize(ctx, chk, get); serr != nil {
 			return nil, serr
 		}
 		return resp, err
 	}
 
-	ctx = context.WithValue(ctx, traceutil.StartTimeKey, time.Now())
+	ctx = context.WithValue(ctx, traceutil.StartTimeKey{}, time.Now())
 	resp, err := s.raftRequest(ctx, pb.InternalRaftRequest{Txn: r})
 	if err != nil {
 		return nil, err
@@ -193,49 +240,28 @@ func (s *EtcdServer) Txn(ctx context.Context, r *pb.TxnRequest) (*pb.TxnResponse
 	return resp.(*pb.TxnResponse), nil
 }
 
-func isTxnSerializable(r *pb.TxnRequest) bool {
-	for _, u := range r.Success {
-		if r := u.GetRequestRange(); r == nil || !r.Serializable {
-			return false
-		}
-	}
-	for _, u := range r.Failure {
-		if r := u.GetRequestRange(); r == nil || !r.Serializable {
-			return false
-		}
-	}
-	return true
-}
-
-func isTxnReadonly(r *pb.TxnRequest) bool {
-	for _, u := range r.Success {
-		if r := u.GetRequestRange(); r == nil {
-			return false
-		}
-	}
-	for _, u := range r.Failure {
-		if r := u.GetRequestRange(); r == nil {
-			return false
-		}
-	}
-	return true
-}
-
 func (s *EtcdServer) Compact(ctx context.Context, r *pb.CompactionRequest) (*pb.CompactionResponse, error) {
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "compact", trace.WithAttributes(
+		attribute.Bool("is_physical", r.GetPhysical()),
+		attribute.Int64("rev", r.GetRevision()),
+	))
+	defer span.End()
+
 	startTime := time.Now()
+	ctx, trace := traceutil.EnsureTrace(ctx, s.Logger(), "compact")
 	result, err := s.processInternalRaftRequestOnce(ctx, pb.InternalRaftRequest{Compaction: r})
-	trace := traceutil.TODO()
-	if result != nil && result.trace != nil {
-		trace = result.trace
+	if result != nil && result.Trace != nil {
+		trace = result.Trace
 		defer func() {
 			trace.LogIfLong(traceThreshold)
 		}()
-		applyStart := result.trace.GetStartTime()
-		result.trace.SetStartTime(startTime)
+		applyStart := result.Trace.GetStartTime()
+		result.Trace.SetStartTime(startTime)
 		trace.InsertStep(0, applyStart, "process raft request")
 	}
-	if r.Physical && result != nil && result.physc != nil {
-		<-result.physc
+	if r.Physical && result != nil && result.Physc != nil {
+		<-result.Physc
 		// The compaction is done deleting keys; the hash is now settled
 		// but the data is not necessarily committed. If there's a crash,
 		// the hash may revert to a hash prior to compaction completing
@@ -246,15 +272,15 @@ func (s *EtcdServer) Compact(ctx context.Context, r *pb.CompactionRequest) (*pb.
 		s.bemu.RLock()
 		s.be.ForceCommit()
 		s.bemu.RUnlock()
-		trace.Step("physically apply compaction")
+		trace.Step("physically toApply compaction")
 	}
 	if err != nil {
 		return nil, err
 	}
-	if result.err != nil {
-		return nil, result.err
+	if result.Err != nil {
+		return nil, result.Err
 	}
-	resp := result.resp.(*pb.CompactionResponse)
+	resp := result.Resp.(*pb.CompactionResponse)
 	if resp == nil {
 		resp = &pb.CompactionResponse{}
 	}
@@ -272,6 +298,13 @@ func (s *EtcdServer) LeaseGrant(ctx context.Context, r *pb.LeaseGrantRequest) (*
 		// only use positive int64 id's
 		r.ID = int64(s.reqIDGen.Next() & ((1 << 63) - 1))
 	}
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "lease_grant", trace.WithAttributes(
+		attribute.Int64("id", r.ID),
+		attribute.Int64("ttl", r.GetTTL()),
+	))
+	defer span.End()
+
 	resp, err := s.raftRequestOnce(ctx, pb.InternalRaftRequest{LeaseGrant: r})
 	if err != nil {
 		return nil, err
@@ -283,15 +316,21 @@ func (s *EtcdServer) waitAppliedIndex() error {
 	select {
 	case <-s.ApplyWait():
 	case <-s.stopping:
-		return ErrStopped
+		return errors.ErrStopped
 	case <-time.After(applyTimeout):
-		return ErrTimeoutWaitAppliedIndex
+		return errors.ErrTimeoutWaitAppliedIndex
 	}
 
 	return nil
 }
 
 func (s *EtcdServer) LeaseRevoke(ctx context.Context, r *pb.LeaseRevokeRequest) (*pb.LeaseRevokeResponse, error) {
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "lease_revoke", trace.WithAttributes(
+		attribute.Int64("id", r.GetID()),
+	))
+	defer span.End()
+
 	resp, err := s.raftRequestOnce(ctx, pb.InternalRaftRequest{LeaseRevoke: r})
 	if err != nil {
 		return nil, err
@@ -300,16 +339,46 @@ func (s *EtcdServer) LeaseRevoke(ctx context.Context, r *pb.LeaseRevokeRequest) 
 }
 
 func (s *EtcdServer) LeaseRenew(ctx context.Context, id lease.LeaseID) (int64, error) {
+	var span trace.Span
+	ctx, span = traceutil.Tracer.Start(ctx, "lease_renew", trace.WithAttributes(
+		attribute.Int64("id", int64(id)),
+	))
+	defer span.End()
+
 	if s.isLeader() {
-		if err := s.waitAppliedIndex(); err != nil {
-			return 0, err
+		// If s.isLeader() returns true, but we fail to ensure the current
+		// member's leadership, there are a couple of possibilities:
+		//   1. current member gets stuck on writing WAL entries;
+		//   2. current member is in network isolation status;
+		//   3. current member isn't a leader anymore (possibly due to #1 above).
+		// In such case, we just return error to client, so that the client can
+		// switch to another member to continue the lease keep-alive operation.
+		if !s.ensureLeadership() {
+			return -1, lease.ErrNotPrimary
+		}
+
+		// This change aims to make lease renewal faster under high server load
+		// while preserving correctness. If a lease is not found, it might still be in
+		// the process of being created. We must wait for the applied index to advance
+		// to verify whether the lease truly does not exist.
+		if s.FeatureEnabled(features.FastLeaseKeepAlive) {
+			le := s.lessor.Lookup(id)
+			if le == nil {
+				if err := s.waitAppliedIndex(); err != nil {
+					return 0, err
+				}
+			}
+		} else {
+			if err := s.waitAppliedIndex(); err != nil {
+				return 0, err
+			}
 		}
 
 		ttl, err := s.lessor.Renew(id)
 		if err == nil { // already requested to primary lessor(leader)
 			return ttl, nil
 		}
-		if err != lease.ErrNotPrimary {
+		if !errorspkg.Is(err, lease.ErrNotPrimary) {
 			return -1, err
 		}
 	}
@@ -326,7 +395,7 @@ func (s *EtcdServer) LeaseRenew(ctx context.Context, id lease.LeaseID) (int64, e
 		for _, url := range leader.PeerURLs {
 			lurl := url + leasehttp.LeasePrefix
 			ttl, err := leasehttp.RenewHTTP(cctx, id, lurl, s.peerRt)
-			if err == nil || err == lease.ErrLeaseNotFound {
+			if err == nil || errorspkg.Is(err, lease.ErrLeaseNotFound) {
 				return ttl, err
 			}
 		}
@@ -334,17 +403,51 @@ func (s *EtcdServer) LeaseRenew(ctx context.Context, id lease.LeaseID) (int64, e
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	if cctx.Err() == context.DeadlineExceeded {
-		return -1, ErrTimeout
+	err := cctx.Err()
+	switch {
+	case errorspkg.Is(err, context.DeadlineExceeded):
+		return -1, errors.ErrTimeout
+	case errorspkg.Is(err, context.Canceled):
+		return -1, errors.ErrCanceled
+	default:
+		s.Logger().Warn("Unexpected lease renew context error", zap.Error(err))
+		return -1, errors.ErrCanceled
 	}
-	return -1, ErrCanceled
 }
 
-func (s *EtcdServer) LeaseTimeToLive(ctx context.Context, r *pb.LeaseTimeToLiveRequest) (*pb.LeaseTimeToLiveResponse, error) {
+func (s *EtcdServer) checkLeaseTimeToLive(ctx context.Context, leaseID lease.LeaseID) (uint64, error) {
+	rev := s.AuthStore().Revision()
+	if !s.AuthStore().IsAuthEnabled() {
+		return rev, nil
+	}
+	authInfo, err := s.AuthInfoFromCtx(ctx)
+	if err != nil {
+		return rev, err
+	}
+	if authInfo == nil {
+		return rev, auth.ErrUserEmpty
+	}
+
+	l := s.lessor.Lookup(leaseID)
+	if l != nil {
+		for _, key := range l.Keys() {
+			if err := s.AuthStore().IsRangePermitted(authInfo, []byte(key), []byte{}); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	return rev, nil
+}
+
+func (s *EtcdServer) leaseTimeToLive(ctx context.Context, r *pb.LeaseTimeToLiveRequest) (*pb.LeaseTimeToLiveResponse, error) {
 	if s.isLeader() {
 		if err := s.waitAppliedIndex(); err != nil {
 			return nil, err
 		}
+
+		// gofail: var beforeLookupWhenLeaseTimeToLive struct{}
+
 		// primary; timetolive directly from leader
 		le := s.lessor.Lookup(lease.LeaseID(r.ID))
 		if le == nil {
@@ -359,6 +462,15 @@ func (s *EtcdServer) LeaseTimeToLive(ctx context.Context, r *pb.LeaseTimeToLiveR
 				kbs[i] = []byte(ks[i])
 			}
 			resp.Keys = kbs
+		}
+
+		// The leasor could be demoted if leader changed during lookup.
+		// We should return error to force retry instead of returning
+		// incorrect remaining TTL.
+		if le.Demoted() {
+			// NOTE: lease.ErrNotPrimary is not retryable error for
+			// client. Instead, uses ErrLeaderChanged.
+			return nil, errors.ErrLeaderChanged
 		}
 		return resp, nil
 	}
@@ -378,25 +490,59 @@ func (s *EtcdServer) LeaseTimeToLive(ctx context.Context, r *pb.LeaseTimeToLiveR
 			if err == nil {
 				return resp.LeaseTimeToLiveResponse, nil
 			}
-			if err == lease.ErrLeaseNotFound {
+			if errorspkg.Is(err, lease.ErrLeaseNotFound) {
 				return nil, err
 			}
 		}
 	}
 
-	if cctx.Err() == context.DeadlineExceeded {
-		return nil, ErrTimeout
+	if errorspkg.Is(cctx.Err(), context.DeadlineExceeded) {
+		return nil, errors.ErrTimeout
 	}
-	return nil, ErrCanceled
+	return nil, errors.ErrCanceled
 }
 
-func (s *EtcdServer) LeaseLeases(ctx context.Context, r *pb.LeaseLeasesRequest) (*pb.LeaseLeasesResponse, error) {
+func (s *EtcdServer) LeaseTimeToLive(ctx context.Context, r *pb.LeaseTimeToLiveRequest) (*pb.LeaseTimeToLiveResponse, error) {
+	var rev uint64
+	var err error
+	if r.Keys {
+		// check RBAC permission only if Keys is true
+		rev, err = s.checkLeaseTimeToLive(ctx, lease.LeaseID(r.ID))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	resp, err := s.leaseTimeToLive(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	if r.Keys {
+		if s.AuthStore().IsAuthEnabled() && rev != s.AuthStore().Revision() {
+			return nil, auth.ErrAuthOldRevision
+		}
+	}
+	return resp, nil
+}
+
+func (s *EtcdServer) newHeader() *pb.ResponseHeader {
+	return &pb.ResponseHeader{
+		ClusterId: uint64(s.cluster.ID()),
+		MemberId:  uint64(s.MemberID()),
+		Revision:  s.KV().Rev(),
+		RaftTerm:  s.Term(),
+	}
+}
+
+// LeaseLeases is really ListLeases !???
+func (s *EtcdServer) LeaseLeases(_ context.Context, _ *pb.LeaseLeasesRequest) (*pb.LeaseLeasesResponse, error) {
 	ls := s.lessor.Leases()
 	lss := make([]*pb.LeaseStatus, len(ls))
 	for i := range ls {
 		lss[i] = &pb.LeaseStatus{ID: int64(ls[i].ID)}
 	}
-	return &pb.LeaseLeasesResponse{Header: newHeader(s), Leases: lss}, nil
+	return &pb.LeaseLeasesResponse{Header: s.newHeader(), Leases: lss}, nil
 }
 
 func (s *EtcdServer) waitLeader(ctx context.Context) (*membership.Member, error) {
@@ -408,13 +554,13 @@ func (s *EtcdServer) waitLeader(ctx context.Context) (*membership.Member, error)
 		case <-time.After(dur):
 			leader = s.cluster.Member(s.Leader())
 		case <-s.stopping:
-			return nil, ErrStopped
+			return nil, errors.ErrStopped
 		case <-ctx.Done():
-			return nil, ErrNoLeader
+			return nil, errors.ErrNoLeader
 		}
 	}
 	if len(leader.PeerURLs) == 0 {
-		return nil, ErrNoLeader
+		return nil, errors.ErrNoLeader
 	}
 	return leader, nil
 }
@@ -458,11 +604,18 @@ func (s *EtcdServer) Authenticate(ctx context.Context, r *pb.AuthenticateRequest
 
 	lg := s.Logger()
 
+	// fix https://nvd.nist.gov/vuln/detail/CVE-2021-28235
+	defer func() {
+		if r != nil {
+			r.Password = ""
+		}
+	}()
+
 	var resp proto.Message
 	for {
 		checkedRevision, err := s.AuthStore().CheckPassword(r.Name, r.Password)
 		if err != nil {
-			if err != auth.ErrAuthNotEnabled {
+			if !errorspkg.Is(err, auth.ErrAuthNotEnabled) {
 				lg.Warn(
 					"invalid authentication was requested",
 					zap.String("user", r.Name),
@@ -623,21 +776,22 @@ func (s *EtcdServer) RoleDelete(ctx context.Context, r *pb.AuthRoleDeleteRequest
 func (s *EtcdServer) raftRequestOnce(ctx context.Context, r pb.InternalRaftRequest) (proto.Message, error) {
 	result, err := s.processInternalRaftRequestOnce(ctx, r)
 	if err != nil {
+		trace.SpanFromContext(ctx).RecordError(err)
 		return nil, err
 	}
-	if result.err != nil {
-		return nil, result.err
+	if result.Err != nil {
+		return nil, result.Err
 	}
-	if startTime, ok := ctx.Value(traceutil.StartTimeKey).(time.Time); ok && result.trace != nil {
-		applyStart := result.trace.GetStartTime()
-		// The trace object is created in apply. Here reset the start time to trace
+	if startTime, ok := ctx.Value(traceutil.StartTimeKey{}).(time.Time); ok && result.Trace != nil {
+		applyStart := result.Trace.GetStartTime()
+		// The trace object is created in toApply. Here reset the start time to trace
 		// the raft request time by the difference between the request start time
-		// and apply start time
-		result.trace.SetStartTime(startTime)
-		result.trace.InsertStep(0, applyStart, "process raft request")
-		result.trace.LogIfLong(traceThreshold)
+		// and toApply start time
+		result.Trace.SetStartTime(startTime)
+		result.Trace.InsertStep(0, applyStart, "process raft request")
+		result.Trace.LogIfLong(traceThreshold)
 	}
-	return result.resp, nil
+	return result.Resp, nil
 }
 
 func (s *EtcdServer) raftRequest(ctx context.Context, r pb.InternalRaftRequest) (proto.Message, error) {
@@ -669,11 +823,11 @@ func (s *EtcdServer) doSerialize(ctx context.Context, chk func(*auth.AuthInfo) e
 	return nil
 }
 
-func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.InternalRaftRequest) (*applyResult, error) {
+func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.InternalRaftRequest) (*apply2.Result, error) {
 	ai := s.getAppliedIndex()
 	ci := s.getCommittedIndex()
 	if ci > ai+maxGapBetweenApplyAndCommitIndex {
-		return nil, ErrTooManyRequests
+		return nil, errors.ErrTooManyRequests
 	}
 
 	r.Header = &pb.RequestHeader{
@@ -692,13 +846,24 @@ func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.In
 		}
 	}
 
-	data, err := r.Marshal()
+	var (
+		data    []byte
+		err     error
+		start   = time.Now()
+		reqType = getRequestType(&r)
+	)
+	defer func() {
+		success := err == nil
+		requestDurationSec.WithLabelValues(reqType, strconv.FormatBool(success)).Observe(time.Since(start).Seconds())
+	}()
+
+	data, err = r.Marshal()
 	if err != nil {
 		return nil, err
 	}
 
 	if len(data) > int(s.Cfg.MaxRequestBytes) {
-		return nil, ErrRequestTooLarge
+		return nil, errors.ErrRequestTooLarge
 	}
 
 	id := r.ID
@@ -710,7 +875,8 @@ func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.In
 	cctx, cancel := context.WithTimeout(ctx, s.Cfg.ReqTimeout())
 	defer cancel()
 
-	start := time.Now()
+	span := trace.SpanFromContext(ctx)
+	span.AddEvent("Send raft proposal")
 	err = s.r.Propose(cctx, data)
 	if err != nil {
 		proposalsFailed.Inc()
@@ -722,13 +888,81 @@ func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.In
 
 	select {
 	case x := <-ch:
-		return x.(*applyResult), nil
+		span.AddEvent("Receive raft result")
+		return x.(*apply2.Result), nil
 	case <-cctx.Done():
 		proposalsFailed.Inc()
 		s.w.Trigger(id, nil) // GC wait
 		return nil, s.parseProposeCtxErr(cctx.Err(), start)
 	case <-s.done:
-		return nil, ErrStopped
+		return nil, errors.ErrStopped
+	}
+}
+
+func getRequestType(r *pb.InternalRaftRequest) string {
+	switch {
+	case r.Range != nil:
+		return "Range"
+	case r.Put != nil:
+		return "Put"
+	case r.DeleteRange != nil:
+		return "DeleteRange"
+	case r.Txn != nil:
+		return "Txn"
+	case r.Compaction != nil:
+		return "Compaction"
+	case r.LeaseGrant != nil:
+		return "LeaseGrant"
+	case r.LeaseRevoke != nil:
+		return "LeaseRevoke"
+	case r.LeaseCheckpoint != nil:
+		return "LeaseCheckpoint"
+	case r.Alarm != nil:
+		return "Alarm"
+	case r.Authenticate != nil:
+		return "Authenticate"
+	case r.AuthEnable != nil:
+		return "AuthEnable"
+	case r.AuthDisable != nil:
+		return "AuthDisable"
+	case r.AuthStatus != nil:
+		return "AuthStatus"
+	case r.AuthUserAdd != nil:
+		return "AuthUserAdd"
+	case r.AuthUserDelete != nil:
+		return "AuthUserDelete"
+	case r.AuthUserChangePassword != nil:
+		return "AuthUserChangePassword"
+	case r.AuthUserGrantRole != nil:
+		return "AuthUserGrantRole"
+	case r.AuthUserGet != nil:
+		return "AuthUserGet"
+	case r.AuthUserRevokeRole != nil:
+		return "AuthUserRevokeRole"
+	case r.AuthRoleAdd != nil:
+		return "AuthRoleAdd"
+	case r.AuthRoleGrantPermission != nil:
+		return "AuthRoleGrantPermission"
+	case r.AuthRoleGet != nil:
+		return "AuthRoleGet"
+	case r.AuthRoleRevokePermission != nil:
+		return "AuthRoleRevokePermission"
+	case r.AuthRoleDelete != nil:
+		return "AuthRoleDelete"
+	case r.AuthUserList != nil:
+		return "AuthUserList"
+	case r.AuthRoleList != nil:
+		return "AuthRoleList"
+	case r.ClusterVersionSet != nil:
+		return "ClusterVersionSet"
+	case r.ClusterMemberAttrSet != nil:
+		return "ClusterMemberAttrSet"
+	case r.DowngradeInfoSet != nil:
+		return "DowngradeInfoSet"
+	case r.DowngradeVersionTest != nil:
+		return "DowngradeVersionTest"
+	default:
+		return "Unknown"
 	}
 }
 
@@ -737,7 +971,6 @@ func (s *EtcdServer) Watchable() mvcc.WatchableKV { return s.KV() }
 
 func (s *EtcdServer) linearizableReadLoop() {
 	for {
-		requestId := s.reqIDGen.Next()
 		leaderChangedNotifier := s.leaderChanged.Receive()
 		select {
 		case <-leaderChangedNotifier:
@@ -749,7 +982,7 @@ func (s *EtcdServer) linearizableReadLoop() {
 
 		// as a single loop is can unlock multiple reads, it is not very useful
 		// to propagate the trace from Txn or Range.
-		trace := traceutil.New("linearizableReadLoop", s.Logger())
+		_, trace := traceutil.EnsureTrace(context.Background(), s.Logger(), "linearizableReadLoop")
 
 		nextnr := newNotifier()
 		s.readMu.Lock()
@@ -757,7 +990,7 @@ func (s *EtcdServer) linearizableReadLoop() {
 		s.readNotifier = nextnr
 		s.readMu.Unlock()
 
-		confirmedIndex, err := s.requestCurrentIndex(leaderChangedNotifier, requestId)
+		confirmedIndex, err := s.requestCurrentIndex(leaderChangedNotifier)
 		if isStopped(err) {
 			return
 		}
@@ -789,11 +1022,14 @@ func (s *EtcdServer) linearizableReadLoop() {
 }
 
 func isStopped(err error) bool {
-	return err == raft.ErrStopped || err == ErrStopped
+	return errorspkg.Is(err, raft.ErrStopped) || errorspkg.Is(err, errors.ErrStopped)
 }
 
-func (s *EtcdServer) requestCurrentIndex(leaderChangedNotifier <-chan struct{}, requestId uint64) (uint64, error) {
-	err := s.sendReadIndex(requestId)
+func (s *EtcdServer) requestCurrentIndex(leaderChangedNotifier <-chan struct{}) (uint64, error) {
+	requestIDs := map[uint64]struct{}{}
+	requestID := s.reqIDGen.Next()
+	requestIDs[requestID] = struct{}{}
+	err := s.sendReadIndex(requestID)
 	if err != nil {
 		return 0, err
 	}
@@ -809,19 +1045,23 @@ func (s *EtcdServer) requestCurrentIndex(leaderChangedNotifier <-chan struct{}, 
 	for {
 		select {
 		case rs := <-s.r.readStateC:
-			requestIdBytes := uint64ToBigEndianBytes(requestId)
-			gotOwnResponse := bytes.Equal(rs.RequestCtx, requestIdBytes)
-			if !gotOwnResponse {
+			// Check again if leader changed as when multiple channels are ready, select picks randomly.
+			select {
+			case <-leaderChangedNotifier:
+				readIndexFailed.Inc()
+				return 0, errors.ErrLeaderChanged
+			default:
+			}
+			responseID := uint64(0)
+			if len(rs.RequestCtx) == 8 {
+				responseID = binary.BigEndian.Uint64(rs.RequestCtx)
+			}
+			if _, ok := requestIDs[responseID]; !ok {
 				// a previous request might time out. now we should ignore the response of it and
 				// continue waiting for the response of the current requests.
-				responseId := uint64(0)
-				if len(rs.RequestCtx) == 8 {
-					responseId = binary.BigEndian.Uint64(rs.RequestCtx)
-				}
 				lg.Warn(
 					"ignored out-of-date read index response; local node read indexes queueing up and waiting to be in sync with leader",
-					zap.Uint64("sent-request-id", requestId),
-					zap.Uint64("received-request-id", responseId),
+					zap.Uint64("received-request-id", responseID),
 				)
 				slowReadIndex.Inc()
 				continue
@@ -830,11 +1070,13 @@ func (s *EtcdServer) requestCurrentIndex(leaderChangedNotifier <-chan struct{}, 
 		case <-leaderChangedNotifier:
 			readIndexFailed.Inc()
 			// return a retryable error.
-			return 0, ErrLeaderChanged
+			return 0, errors.ErrLeaderChanged
 		case <-firstCommitInTermNotifier:
 			firstCommitInTermNotifier = s.firstCommitInTerm.Receive()
 			lg.Info("first commit in current term: resending ReadIndex request")
-			err := s.sendReadIndex(requestId)
+			requestID = s.reqIDGen.Next()
+			requestIDs[requestID] = struct{}{}
+			err := s.sendReadIndex(requestID)
 			if err != nil {
 				return 0, err
 			}
@@ -843,10 +1085,12 @@ func (s *EtcdServer) requestCurrentIndex(leaderChangedNotifier <-chan struct{}, 
 		case <-retryTimer.C:
 			lg.Warn(
 				"waiting for ReadIndex response took too long, retrying",
-				zap.Uint64("sent-request-id", requestId),
+				zap.Uint64("sent-request-id", requestID),
 				zap.Duration("retry-timeout", readIndexRetryTime),
 			)
-			err := s.sendReadIndex(requestId)
+			requestID = s.reqIDGen.Next()
+			requestIDs[requestID] = struct{}{}
+			err := s.sendReadIndex(requestID)
 			if err != nil {
 				return 0, err
 			}
@@ -858,9 +1102,9 @@ func (s *EtcdServer) requestCurrentIndex(leaderChangedNotifier <-chan struct{}, 
 				zap.Duration("timeout", s.Cfg.ReqTimeout()),
 			)
 			slowReadIndex.Inc()
-			return 0, ErrTimeout
+			return 0, errors.ErrTimeout
 		case <-s.stopping:
-			return 0, ErrStopped
+			return 0, errors.ErrStopped
 		}
 	}
 }
@@ -877,7 +1121,7 @@ func (s *EtcdServer) sendReadIndex(requestIndex uint64) error {
 	cctx, cancel := context.WithTimeout(context.Background(), s.Cfg.ReqTimeout())
 	err := s.r.ReadIndex(cctx, ctxToSend)
 	cancel()
-	if err == raft.ErrStopped {
+	if errorspkg.Is(err, raft.ErrStopped) {
 		return err
 	}
 	if err != nil {
@@ -911,7 +1155,7 @@ func (s *EtcdServer) linearizableReadNotify(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-s.done:
-		return ErrStopped
+		return errors.ErrStopped
 	}
 }
 
@@ -936,7 +1180,7 @@ func (s *EtcdServer) Downgrade(ctx context.Context, r *pb.DowngradeRequest) (*pb
 	case pb.DowngradeRequest_CANCEL:
 		return s.downgradeCancel(ctx)
 	default:
-		return nil, ErrUnknownMethod
+		return nil, errors.ErrUnknownMethod
 	}
 }
 
@@ -950,7 +1194,7 @@ func (s *EtcdServer) downgradeValidate(ctx context.Context, v string) (*pb.Downg
 
 	cv := s.ClusterVersion()
 	if cv == nil {
-		return nil, ErrClusterVersionUnavailable
+		return nil, errors.ErrClusterVersionUnavailable
 	}
 	resp.Version = version.Cluster(cv.String())
 	err = s.Version().DowngradeValidate(ctx, targetVersion)

@@ -75,3 +75,31 @@ func TestIsSortOptionValid(t *testing.T) {
 		}
 	}
 }
+
+func TestIsOptsWithPrefix(t *testing.T) {
+	optswithprefix := []OpOption{WithPrefix()}
+	op := OpGet("key", optswithprefix...)
+	if !IsOptsWithPrefix(optswithprefix) || !op.IsOptsWithPrefix() {
+		t.Errorf("IsOptsWithPrefix = false, expected true")
+	}
+
+	optswithfromkey := []OpOption{WithFromKey()}
+	op = OpGet("key", optswithfromkey...)
+	if IsOptsWithPrefix(optswithfromkey) || op.IsOptsWithPrefix() {
+		t.Errorf("IsOptsWithPrefix = true, expected false")
+	}
+}
+
+func TestIsOptsWithFromKey(t *testing.T) {
+	optswithfromkey := []OpOption{WithFromKey()}
+	op := OpGet("key", optswithfromkey...)
+	if !IsOptsWithFromKey(optswithfromkey) || !op.IsOptsWithFromKey() {
+		t.Errorf("IsOptsWithFromKey = false, expected true")
+	}
+
+	optswithprefix := []OpOption{WithPrefix()}
+	op = OpGet("key", optswithprefix...)
+	if IsOptsWithFromKey(optswithprefix) || op.IsOptsWithFromKey() {
+		t.Errorf("IsOptsWithFromKey = true, expected false")
+	}
+}

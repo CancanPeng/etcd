@@ -15,9 +15,7 @@
 package rafthttp
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,15 +24,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coreos/go-semver/semver"
+	"go.uber.org/zap/zaptest"
+	"golang.org/x/time/rate"
+
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/raft/v3/raftpb"
 	stats "go.etcd.io/etcd/server/v3/etcdserver/api/v2stats"
-	"go.uber.org/zap/zaptest"
-
-	"github.com/coreos/go-semver/semver"
-	"golang.org/x/time/rate"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 // TestStreamWriterAttachOutgoingConn tests that outgoingConn can be attached
@@ -117,7 +115,7 @@ func TestStreamReaderDialRequest(t *testing.T) {
 			peerID: types.ID(2),
 			tr:     &Transport{streamRt: tr, ClusterID: types.ID(1), ID: types.ID(1)},
 			picker: mustNewURLPicker(t, []string{"http://localhost:2380"}),
-			ctx:    context.Background(),
+			ctx:    t.Context(),
 		}
 		sr.dial(tt)
 
@@ -127,7 +125,7 @@ func TestStreamReaderDialRequest(t *testing.T) {
 		}
 		req := act[0].Params[0].(*http.Request)
 
-		wurl := fmt.Sprintf("http://localhost:2380" + tt.endpoint(zaptest.NewLogger(t)) + "/1")
+		wurl := "http://localhost:2380" + tt.endpoint(zaptest.NewLogger(t)) + "/1"
 		if req.URL.String() != wurl {
 			t.Errorf("#%d: url = %s, want %s", i, req.URL.String(), wurl)
 		}
@@ -172,7 +170,7 @@ func TestStreamReaderDialResult(t *testing.T) {
 			tr:     &Transport{streamRt: tr, ClusterID: types.ID(1)},
 			picker: mustNewURLPicker(t, []string{"http://localhost:2380"}),
 			errorc: make(chan error, 1),
-			ctx:    context.Background(),
+			ctx:    t.Context(),
 		}
 
 		_, err := sr.dial(streamTypeMessage)
@@ -235,6 +233,7 @@ func (wrc *waitReadCloser) Read(p []byte) (int, error) {
 	<-wrc.closec
 	return 0, io.EOF
 }
+
 func (wrc *waitReadCloser) Close() error {
 	close(wrc.closec)
 	return nil
@@ -253,11 +252,11 @@ func TestStreamReaderDialDetectUnsupport(t *testing.T) {
 			peerID: types.ID(2),
 			tr:     &Transport{streamRt: tr, ClusterID: types.ID(1)},
 			picker: mustNewURLPicker(t, []string{"http://localhost:2380"}),
-			ctx:    context.Background(),
+			ctx:    t.Context(),
 		}
 
 		_, err := sr.dial(typ)
-		if err != errUnsupportedStreamType {
+		if !errors.Is(err, errUnsupportedStreamType) {
 			t.Errorf("#%d: error = %v, want %v", i, err, errUnsupportedStreamType)
 		}
 	}

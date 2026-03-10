@@ -25,8 +25,10 @@ import (
 	"time"
 
 	humanize "github.com/dustin/go-humanize"
-	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	bolt "go.etcd.io/bbolt"
+	"go.etcd.io/etcd/client/pkg/v3/verify"
 )
 
 var (
@@ -35,10 +37,10 @@ var (
 
 	defragLimit = 10000
 
-	// initialMmapSize is the initial size of the mmapped region. Setting this larger than
+	// InitialMmapSize is the initial size of the mmapped region. Setting this larger than
 	// the potential max db size can prevent writer from blocking reader.
 	// This only works for linux.
-	initialMmapSize = uint64(10 * 1024 * 1024 * 1024)
+	InitialMmapSize = uint64(10 * 1024 * 1024 * 1024)
 
 	// minSnapshotWarningTimeout is the minimum threshold to trigger a long running snapshot warning.
 	minSnapshotWarningTimeout = 30 * time.Second
@@ -145,16 +147,21 @@ type BackendConfig struct {
 	UnsafeNoFsync bool `json:"unsafe-no-fsync"`
 	// Mlock prevents backend database file to be swapped
 	Mlock bool
+	// Timeout is the amount of time to wait to obtain a file lock.
+	// When set to zero it will wait indefinitely.
+	Timeout time.Duration
 
 	// Hooks are getting executed during lifecycle of Backend's transactions.
 	Hooks Hooks
 }
 
+type BackendConfigOption func(*BackendConfig)
+
 func DefaultBackendConfig(lg *zap.Logger) BackendConfig {
 	return BackendConfig{
 		BatchInterval: defaultBatchInterval,
 		BatchLimit:    defaultBatchLimit,
-		MmapSize:      initialMmapSize,
+		MmapSize:      InitialMmapSize,
 		Logger:        lg,
 	}
 }
@@ -163,9 +170,25 @@ func New(bcfg BackendConfig) Backend {
 	return newBackend(bcfg)
 }
 
-func NewDefaultBackend(lg *zap.Logger, path string) Backend {
+func WithMmapSize(size uint64) BackendConfigOption {
+	return func(bcfg *BackendConfig) {
+		bcfg.MmapSize = size
+	}
+}
+
+func WithTimeout(timeout time.Duration) BackendConfigOption {
+	return func(bcfg *BackendConfig) {
+		bcfg.Timeout = timeout
+	}
+}
+
+func NewDefaultBackend(lg *zap.Logger, path string, opts ...BackendConfigOption) Backend {
 	bcfg := DefaultBackendConfig(lg)
 	bcfg.Path = path
+	for _, opt := range opts {
+		opt(&bcfg)
+	}
+
 	return newBackend(bcfg)
 }
 
@@ -174,13 +197,20 @@ func newBackend(bcfg BackendConfig) *backend {
 	if boltOpenOptions != nil {
 		*bopts = *boltOpenOptions
 	}
+
+	if bcfg.Logger == nil {
+		bcfg.Logger = zap.NewNop()
+	}
+
 	bopts.InitialMmapSize = bcfg.mmapSize()
 	bopts.FreelistType = bcfg.BackendFreelistType
 	bopts.NoSync = bcfg.UnsafeNoFsync
 	bopts.NoGrowSync = bcfg.UnsafeNoFsync
 	bopts.Mlock = bcfg.Mlock
+	bopts.Logger = newBoltLoggerZap(bcfg)
+	bopts.Timeout = bcfg.Timeout
 
-	db, err := bolt.Open(bcfg.Path, 0600, bopts)
+	db, err := bolt.Open(bcfg.Path, 0o600, bopts)
 	if err != nil {
 		bcfg.Logger.Panic("failed to open database", zap.String("path", bcfg.Path), zap.Error(err))
 	}
@@ -380,7 +410,7 @@ func (b *backend) Hash(ignores func(bucketName, keyName []byte) bool) (uint32, e
 		for next, _ := c.First(); next != nil; next, _ = c.Next() {
 			b := tx.Bucket(next)
 			if b == nil {
-				return fmt.Errorf("cannot get hash of bucket %s", string(next))
+				return fmt.Errorf("cannot get hash of bucket %s", next)
 			}
 			h.Write(next)
 			b.ForEach(func(k, v []byte) error {
@@ -393,7 +423,6 @@ func (b *backend) Hash(ignores func(bucketName, keyName []byte) bool) (uint32, e
 		}
 		return nil
 	})
-
 	if err != nil {
 		return 0, err
 	}
@@ -445,6 +474,7 @@ func (b *backend) Defrag() error {
 }
 
 func (b *backend) defrag() error {
+	verify.Assert(b.lg != nil, "the logger should not be nil")
 	now := time.Now()
 	isDefragActive.Set(1)
 	defer isDefragActive.Set(0)
@@ -463,10 +493,6 @@ func (b *backend) defrag() error {
 	b.readTx.Lock()
 	defer b.readTx.Unlock()
 
-	b.batchTx.unsafeCommit(true)
-
-	b.batchTx.tx = nil
-
 	// Create a temporary file to ensure we start with a clean slate.
 	// Snapshotter.cleanupSnapdir cleans up any of these that are found during startup.
 	dir := filepath.Dir(b.db.Path())
@@ -474,33 +500,58 @@ func (b *backend) defrag() error {
 	if err != nil {
 		return err
 	}
+
 	options := bolt.Options{}
 	if boltOpenOptions != nil {
 		options = *boltOpenOptions
 	}
 	options.OpenFile = func(_ string, _ int, _ os.FileMode) (file *os.File, err error) {
+		// gofail: var defragOpenFileError string
+		// return nil, fmt.Errorf(defragOpenFileError)
 		return temp, nil
 	}
 	// Don't load tmp db into memory regardless of opening options
 	options.Mlock = false
 	tdbp := temp.Name()
-	tmpdb, err := bolt.Open(tdbp, 0600, &options)
+	tmpdb, err := bolt.Open(tdbp, 0o600, &options)
 	if err != nil {
+		temp.Close()
+		if rmErr := os.Remove(temp.Name()); rmErr != nil {
+			b.lg.Error(
+				"failed to remove temporary file",
+				zap.String("path", temp.Name()),
+				zap.Error(rmErr),
+			)
+		}
+
 		return err
 	}
 
 	dbp := b.db.Path()
 	size1, sizeInUse1 := b.Size(), b.SizeInUse()
-	if b.lg != nil {
-		b.lg.Info(
-			"defragmenting",
-			zap.String("path", dbp),
-			zap.Int64("current-db-size-bytes", size1),
-			zap.String("current-db-size", humanize.Bytes(uint64(size1))),
-			zap.Int64("current-db-size-in-use-bytes", sizeInUse1),
-			zap.String("current-db-size-in-use", humanize.Bytes(uint64(sizeInUse1))),
-		)
-	}
+	b.lg.Info(
+		"defragmenting",
+		zap.String("path", dbp),
+		zap.Int64("current-db-size-bytes", size1),
+		zap.String("current-db-size", humanize.Bytes(uint64(size1))),
+		zap.Int64("current-db-size-in-use-bytes", sizeInUse1),
+		zap.String("current-db-size-in-use", humanize.Bytes(uint64(sizeInUse1))),
+	)
+
+	defer func() {
+		// NOTE: We should exit as soon as possible because that tx
+		// might be closed. The inflight request might use invalid
+		// tx and then panic as well. The real panic reason might be
+		// shadowed by new panic. So, we should fatal here with lock.
+		if rerr := recover(); rerr != nil {
+			b.lg.Fatal("unexpected panic during defrag", zap.Any("panic", rerr))
+		}
+	}()
+
+	// Commit/stop and then reset current transactions (including the readTx)
+	b.batchTx.unsafeCommit(true)
+	b.batchTx.tx = nil
+
 	// gofail: var defragBeforeCopy struct{}
 	err = defragdb(b.db, tmpdb, defragLimit)
 	if err != nil {
@@ -508,6 +559,11 @@ func (b *backend) defrag() error {
 		if rmErr := os.RemoveAll(tmpdb.Path()); rmErr != nil {
 			b.lg.Error("failed to remove db.tmp after defragmentation completed", zap.Error(rmErr))
 		}
+
+		// restore the bbolt transactions if defragmentation fails
+		b.batchTx.tx = b.unsafeBegin(true)
+		b.readTx.tx = b.unsafeBegin(false)
+
 		return err
 	}
 
@@ -525,7 +581,7 @@ func (b *backend) defrag() error {
 		b.lg.Fatal("failed to rename tmp database", zap.Error(err))
 	}
 
-	b.db, err = bolt.Open(dbp, 0600, b.bopts)
+	b.db, err = bolt.Open(dbp, 0o600, b.bopts)
 	if err != nil {
 		b.lg.Fatal("failed to open database", zap.String("path", dbp), zap.Error(err))
 	}
@@ -543,23 +599,24 @@ func (b *backend) defrag() error {
 	defragSec.Observe(took.Seconds())
 
 	size2, sizeInUse2 := b.Size(), b.SizeInUse()
-	if b.lg != nil {
-		b.lg.Info(
-			"finished defragmenting directory",
-			zap.String("path", dbp),
-			zap.Int64("current-db-size-bytes-diff", size2-size1),
-			zap.Int64("current-db-size-bytes", size2),
-			zap.String("current-db-size", humanize.Bytes(uint64(size2))),
-			zap.Int64("current-db-size-in-use-bytes-diff", sizeInUse2-sizeInUse1),
-			zap.Int64("current-db-size-in-use-bytes", sizeInUse2),
-			zap.String("current-db-size-in-use", humanize.Bytes(uint64(sizeInUse2))),
-			zap.Duration("took", took),
-		)
-	}
+	b.lg.Info(
+		"finished defragmenting directory",
+		zap.String("path", dbp),
+		zap.Int64("current-db-size-bytes-diff", size2-size1),
+		zap.Int64("current-db-size-bytes", size2),
+		zap.String("current-db-size", humanize.Bytes(uint64(size2))),
+		zap.Int64("current-db-size-in-use-bytes-diff", sizeInUse2-sizeInUse1),
+		zap.Int64("current-db-size-in-use-bytes", sizeInUse2),
+		zap.String("current-db-size-in-use", humanize.Bytes(uint64(sizeInUse2))),
+		zap.Duration("took", took),
+	)
 	return nil
 }
 
 func defragdb(odb, tmpdb *bolt.DB, limit int) error {
+	// gofail: var defragdbFail string
+	// return fmt.Errorf(defragdbFail)
+
 	// open a tx on tmpdb for writes
 	tmptx, err := tmpdb.Begin(true)
 	if err != nil {
@@ -584,7 +641,7 @@ func defragdb(odb, tmpdb *bolt.DB, limit int) error {
 	for next, _ := c.First(); next != nil; next, _ = c.Next() {
 		b := tx.Bucket(next)
 		if b == nil {
-			return fmt.Errorf("backend: cannot defrag bucket %s", string(next))
+			return fmt.Errorf("backend: cannot defrag bucket %s", next)
 		}
 
 		tmpb, berr := tmptx.CreateBucketIfNotExists(next)
@@ -634,7 +691,9 @@ func (b *backend) begin(write bool) *bolt.Tx {
 }
 
 func (b *backend) unsafeBegin(write bool) *bolt.Tx {
+	// gofail: var beforeStartDBTxn struct{}
 	tx, err := b.db.Begin(write)
+	// gofail: var afterStartDBTxn struct{}
 	if err != nil {
 		b.lg.Fatal("failed to begin tx", zap.Error(err))
 	}
@@ -655,4 +714,21 @@ func (s *snapshot) Close() error {
 	close(s.stopc)
 	<-s.donec
 	return s.Tx.Rollback()
+}
+
+func newBoltLoggerZap(bcfg BackendConfig) bolt.Logger {
+	lg := bcfg.Logger.Named("bbolt")
+	return &zapBoltLogger{lg.WithOptions(zap.AddCallerSkip(1)).Sugar()}
+}
+
+type zapBoltLogger struct {
+	*zap.SugaredLogger
+}
+
+func (zl *zapBoltLogger) Warning(args ...any) {
+	zl.SugaredLogger.Warn(args...)
+}
+
+func (zl *zapBoltLogger) Warningf(format string, args ...any) {
+	zl.SugaredLogger.Warnf(format, args...)
 }

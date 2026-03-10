@@ -1,6 +1,16 @@
-// Copyright 2013 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright 2025 The etcd Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package testutil
 
@@ -34,6 +44,8 @@ running(leaking) after all tests.
 		...
 	}
 */
+var normalizedRegexp = regexp.MustCompile(`\(0[0-9a-fx, ]*\)`)
+
 func CheckLeakedGoroutine() bool {
 	gs := interestingGoroutines()
 	if len(gs) == 0 {
@@ -41,14 +53,13 @@ func CheckLeakedGoroutine() bool {
 	}
 
 	stackCount := make(map[string]int)
-	re := regexp.MustCompile(`\(0[0-9a-fx, ]*\)`)
 	for _, g := range gs {
 		// strip out pointer arguments in first function of stack dump
-		normalized := string(re.ReplaceAll([]byte(g), []byte("(...)")))
+		normalized := string(normalizedRegexp.ReplaceAll([]byte(g), []byte("(...)")))
 		stackCount[normalized]++
 	}
 
-	fmt.Fprintf(os.Stderr, "Unexpected goroutines running after all test(s).\n")
+	fmt.Fprint(os.Stderr, "Unexpected goroutines running after all test(s).\n")
 	for stack, count := range stackCount {
 		fmt.Fprintf(os.Stderr, "%d instances of:\n%s\n", count, stack)
 	}
@@ -111,7 +122,7 @@ func RegisterLeakDetection(t TB) {
 // It will detect common goroutine leaks, retrying in case there are goroutines
 // not synchronously torn down, and fail the test if any goroutines are stuck.
 func afterTest(t TB) {
-	// If test-failed the leaked goroutines list is hidding the real
+	// If the test fails, the leaked goroutines list may hide the real
 	// source of problem.
 	if !t.Failed() {
 		if err := CheckAfterTest(1 * time.Second); err != nil {
@@ -129,28 +140,45 @@ func interestingGoroutines() (gs []string) {
 			continue
 		}
 		stack := strings.TrimSpace(sl[1])
-		if stack == "" ||
-			strings.Contains(stack, "sync.(*WaitGroup).Done") ||
-			strings.Contains(stack, "os.(*file).close") ||
-			strings.Contains(stack, "os.(*Process).Release") ||
-			strings.Contains(stack, "created by os/signal.init") ||
-			strings.Contains(stack, "runtime/panic.go") ||
-			strings.Contains(stack, "created by testing.RunTests") ||
-			strings.Contains(stack, "created by testing.runTests") ||
-			strings.Contains(stack, "created by testing.(*T).Run") ||
-			strings.Contains(stack, "testing.Main(") ||
-			strings.Contains(stack, "runtime.goexit") ||
-			strings.Contains(stack, "go.etcd.io/etcd/client/pkg/v3/testutil.interestingGoroutines") ||
-			strings.Contains(stack, "go.etcd.io/etcd/client/pkg/v3/logutil.(*MergeLogger).outputLoop") ||
-			strings.Contains(stack, "github.com/golang/glog.(*loggingT).flushDaemon") ||
-			strings.Contains(stack, "created by runtime.gc") ||
-			strings.Contains(stack, "created by text/template/parse.lex") ||
-			strings.Contains(stack, "runtime.MHeap_Scavenger") ||
-			strings.Contains(stack, "rcrypto/internal/boring.(*PublicKeyRSA).finalize") ||
-			strings.Contains(stack, "net.(*netFD).Close(") ||
-			strings.Contains(stack, "testing.(*T).Run") {
+		if stack == "" {
 			continue
 		}
+
+		shouldSkip := func() bool {
+			uninterestingMsgs := [...]string{
+				"sync.(*WaitGroup).Done",
+				"os.(*file).close",
+				"os.(*Process).Release",
+				"created by os/signal.init",
+				"runtime/panic.go",
+				"created by testing.RunTests",
+				"created by testing.runTests",
+				"created by testing.(*T).Run",
+				"testing.Main(",
+				"runtime.goexit",
+				"go.etcd.io/etcd/client/pkg/v3/testutil.interestingGoroutines",
+				"go.etcd.io/etcd/client/pkg/v3/logutil.(*MergeLogger).outputLoop",
+				"github.com/golang/glog.(*loggingT).flushDaemon",
+				"created by runtime.gc",
+				"created by text/template/parse.lex",
+				"runtime.MHeap_Scavenger",
+				"rcrypto/internal/boring.(*PublicKeyRSA).finalize",
+				"net.(*netFD).Close(",
+				"testing.(*T).Run",
+				"crypto/tls.(*certCache).evict",
+			}
+			for _, msg := range uninterestingMsgs {
+				if strings.Contains(stack, msg) {
+					return true
+				}
+			}
+			return false
+		}()
+
+		if shouldSkip {
+			continue
+		}
+
 		gs = append(gs, stack)
 	}
 	sort.Strings(gs)

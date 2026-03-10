@@ -15,26 +15,25 @@
 package mvcc
 
 import (
-	"context"
-	"os"
 	"reflect"
 	"testing"
 	"time"
+
+	"go.uber.org/zap/zaptest"
 
 	"go.etcd.io/etcd/pkg/v3/traceutil"
 	"go.etcd.io/etcd/server/v3/lease"
 	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
 	"go.etcd.io/etcd/server/v3/storage/schema"
-	"go.uber.org/zap/zaptest"
 )
 
 func TestScheduleCompaction(t *testing.T) {
-	revs := []revision{{1, 0}, {2, 0}, {3, 0}}
+	revs := []Revision{{Main: 1}, {Main: 2}, {Main: 3}}
 
 	tests := []struct {
 		rev   int64
-		keep  map[revision]struct{}
-		wrevs []revision
+		keep  map[Revision]struct{}
+		wrevs []Revision
 	}{
 		// compact at 1 and discard all history
 		{
@@ -51,39 +50,47 @@ func TestScheduleCompaction(t *testing.T) {
 		// compact at 1 and keeps history one step earlier
 		{
 			1,
-			map[revision]struct{}{
-				{main: 1}: {},
+			map[Revision]struct{}{
+				{Main: 1}: {},
 			},
 			revs,
 		},
 		// compact at 1 and keeps history two steps earlier
 		{
 			3,
-			map[revision]struct{}{
-				{main: 2}: {},
-				{main: 3}: {},
+			map[Revision]struct{}{
+				{Main: 2}: {},
+				{Main: 3}: {},
 			},
 			revs[1:],
 		},
 	}
 	for i, tt := range tests {
-		b, tmpPath := betesting.NewDefaultTmpBackend(t)
+		b, _ := betesting.NewDefaultTmpBackend(t)
 		s := NewStore(zaptest.NewLogger(t), b, &lease.FakeLessor{}, StoreConfig{})
+		fi := newFakeIndex()
+		fi.indexCompactRespc <- tt.keep
+		s.kvindex = fi
+
 		tx := s.b.BatchTx()
 
 		tx.Lock()
-		ibytes := newRevBytes()
 		for _, rev := range revs {
-			revToBytes(rev, ibytes)
+			ibytes := NewRevBytes()
+			ibytes = RevToBytes(rev, ibytes)
 			tx.UnsafePut(schema.Key, ibytes, []byte("bar"))
 		}
 		tx.Unlock()
 
-		s.scheduleCompaction(tt.rev, tt.keep)
+		_, err := s.scheduleCompaction(tt.rev, 0)
+		if err != nil {
+			t.Error(err)
+		}
 
 		tx.Lock()
 		for _, rev := range tt.wrevs {
-			revToBytes(rev, ibytes)
+			ibytes := NewRevBytes()
+			ibytes = RevToBytes(rev, ibytes)
 			keys, _ := tx.UnsafeRange(schema.Key, ibytes, nil, 0)
 			if len(keys) != 1 {
 				t.Errorf("#%d: range on %v = %d, want 1", i, rev, len(keys))
@@ -95,14 +102,14 @@ func TestScheduleCompaction(t *testing.T) {
 		}
 		tx.Unlock()
 
-		cleanup(s, b, tmpPath)
+		cleanup(s, b)
 	}
 }
 
 func TestCompactAllAndRestore(t *testing.T) {
-	b, tmpPath := betesting.NewDefaultTmpBackend(t)
+	b, _ := betesting.NewDefaultTmpBackend(t)
 	s0 := NewStore(zaptest.NewLogger(t), b, &lease.FakeLessor{}, StoreConfig{})
-	defer os.Remove(tmpPath)
+	defer b.Close()
 
 	s0.Put([]byte("foo"), []byte("bar"), lease.NoLease)
 	s0.Put([]byte("foo"), []byte("bar1"), lease.NoLease)
@@ -131,8 +138,12 @@ func TestCompactAllAndRestore(t *testing.T) {
 	if s1.Rev() != rev {
 		t.Errorf("rev = %v, want %v", s1.Rev(), rev)
 	}
-	_, err = s1.Range(context.TODO(), []byte("foo"), nil, RangeOptions{})
+	_, err = s1.Range(t.Context(), []byte("foo"), nil, RangeOptions{})
 	if err != nil {
 		t.Errorf("unexpect range error %v", err)
+	}
+	err = s1.Close()
+	if err != nil {
+		t.Fatal(err)
 	}
 }

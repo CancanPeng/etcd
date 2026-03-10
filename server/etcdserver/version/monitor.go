@@ -16,10 +16,12 @@ package version
 
 import (
 	"context"
+	"errors"
 
 	"github.com/coreos/go-semver/semver"
-	"go.etcd.io/etcd/api/v3/version"
 	"go.uber.org/zap"
+
+	"go.etcd.io/etcd/api/v3/version"
 )
 
 // Monitor contains logic used by cluster leader to monitor version changes and decide on cluster version or downgrade progress.
@@ -50,51 +52,61 @@ func NewMonitor(lg *zap.Logger, storage Server) *Monitor {
 }
 
 // UpdateClusterVersionIfNeeded updates the cluster version.
-func (m *Monitor) UpdateClusterVersionIfNeeded() {
-	newClusterVersion := m.decideClusterVersion()
+func (m *Monitor) UpdateClusterVersionIfNeeded() error {
+	newClusterVersion, err := m.decideClusterVersion()
 	if newClusterVersion != nil {
 		newClusterVersion = &semver.Version{Major: newClusterVersion.Major, Minor: newClusterVersion.Minor}
 		m.s.UpdateClusterVersion(newClusterVersion.String())
 	}
+	return err
 }
 
 // decideClusterVersion decides whether to change cluster version and its next value.
 // New cluster version is based on the members versions server and whether cluster is downgrading.
 // Returns nil if cluster version should be left unchanged.
-func (m *Monitor) decideClusterVersion() *semver.Version {
+func (m *Monitor) decideClusterVersion() (*semver.Version, error) {
 	clusterVersion := m.s.GetClusterVersion()
 	minimalServerVersion := m.membersMinimalServerVersion()
 	if clusterVersion == nil {
 		if minimalServerVersion != nil {
-			return minimalServerVersion
+			return minimalServerVersion, nil
 		}
-		return semver.New(version.MinClusterVersion)
+		return semver.New(version.MinClusterVersion), nil
 	}
 	if minimalServerVersion == nil {
-		return nil
+		return nil, nil
 	}
 	downgrade := m.s.GetDowngradeInfo()
 	if downgrade != nil && downgrade.Enabled {
-		if IsValidVersionChange(clusterVersion, downgrade.GetTargetVersion()) && IsValidVersionChange(minimalServerVersion, downgrade.GetTargetVersion()) {
-			return downgrade.GetTargetVersion()
+		if downgrade.GetTargetVersion().Equal(*clusterVersion) {
+			return nil, nil
 		}
-		m.lg.Error("Cannot downgrade cluster version, version change is not valid",
-			zap.String("downgrade-version", downgrade.TargetVersion),
-			zap.String("cluster-version", clusterVersion.String()),
-			zap.String("minimal-server-version", minimalServerVersion.String()),
-		)
-		return nil
+		if !isValidDowngrade(clusterVersion, downgrade.GetTargetVersion()) {
+			m.lg.Error("Cannot downgrade from cluster-version to downgrade-target",
+				zap.String("downgrade-target", downgrade.TargetVersion),
+				zap.String("cluster-version", clusterVersion.String()),
+			)
+			return nil, errors.New("invalid downgrade target")
+		}
+		if !isValidDowngrade(minimalServerVersion, downgrade.GetTargetVersion()) {
+			m.lg.Error("Cannot downgrade from minimal-server-version to downgrade-target",
+				zap.String("downgrade-target", downgrade.TargetVersion),
+				zap.String("minimal-server-version", minimalServerVersion.String()),
+			)
+			return nil, errors.New("invalid downgrade target")
+		}
+		return downgrade.GetTargetVersion(), nil
 	}
-	if clusterVersion.LessThan(*minimalServerVersion) && IsValidVersionChange(clusterVersion, minimalServerVersion) {
-		return minimalServerVersion
+	if clusterVersion.LessThan(*minimalServerVersion) && IsValidClusterVersionChange(clusterVersion, minimalServerVersion) {
+		return minimalServerVersion, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // UpdateStorageVersionIfNeeded updates the storage version if it differs from cluster version.
 func (m *Monitor) UpdateStorageVersionIfNeeded() {
 	cv := m.s.GetClusterVersion()
-	if cv == nil {
+	if cv == nil || cv.String() == version.MinClusterVersion {
 		return
 	}
 	sv := m.s.GetStorageVersion()

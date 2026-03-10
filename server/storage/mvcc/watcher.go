@@ -16,15 +16,15 @@ package mvcc
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"sync"
 
-	"go.etcd.io/etcd/api/v3/mvccpb"
-)
+	"go.opentelemetry.io/otel/trace"
 
-// AutoWatchID is the watcher ID passed in WatchStream.Watch when no
-// user-provided ID is available. If pass, an ID will automatically be assigned.
-const AutoWatchID WatchID = 0
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
+)
 
 var (
 	ErrWatcherNotExist    = errors.New("mvcc: watcher does not exist")
@@ -48,7 +48,7 @@ type WatchStream interface {
 	// in events that are sent to the created watcher through stream channel.
 	// The watch ID is used when it's not equal to AutoWatchID. Otherwise,
 	// an auto-generated watch ID is returned.
-	Watch(id WatchID, key, end []byte, startRev int64, fcs ...FilterFunc) (WatchID, error)
+	Watch(ctx context.Context, id WatchID, key, end []byte, startRev int64, fcs ...FilterFunc) (WatchID, error)
 
 	// Chan returns a chan. All watch response will be sent to the returned chan.
 	Chan() <-chan WatchResponse
@@ -60,6 +60,13 @@ type WatchStream interface {
 	// The responses contains no events. The revision in the response is the progress
 	// of the watchers since the watcher is currently synced.
 	RequestProgress(id WatchID)
+
+	// RequestProgressAll requests a progress notification for all
+	// watchers sharing the stream.  If all watchers are synced, a
+	// progress notification with watch ID -1 will be sent to an
+	// arbitrary watcher of this stream, and the function returns
+	// true.
+	RequestProgressAll() bool
 
 	// Cancel cancels a watcher by giving its ID. If watcher does not exist, an error will be
 	// returned.
@@ -105,7 +112,7 @@ type watchStream struct {
 }
 
 // Watch creates a new watcher in the stream and returns its WatchID.
-func (ws *watchStream) Watch(id WatchID, key, end []byte, startRev int64, fcs ...FilterFunc) (WatchID, error) {
+func (ws *watchStream) Watch(ctx context.Context, id WatchID, key, end []byte, startRev int64, fcs ...FilterFunc) (WatchID, error) {
 	// prevent wrong range where key >= end lexicographically
 	// watch request with 'WithFromKey' has empty-byte range end
 	if len(end) != 0 && bytes.Compare(key, end) != -1 {
@@ -118,7 +125,7 @@ func (ws *watchStream) Watch(id WatchID, key, end []byte, startRev int64, fcs ..
 		return -1, ErrEmptyWatcherRange
 	}
 
-	if id == AutoWatchID {
+	if id == clientv3.AutoWatchID {
 		for ws.watchers[ws.nextID] != nil {
 			ws.nextID++
 		}
@@ -130,7 +137,11 @@ func (ws *watchStream) Watch(id WatchID, key, end []byte, startRev int64, fcs ..
 
 	w, c := ws.watchable.watch(key, end, startRev, id, ws.ch, fcs...)
 
-	ws.cancels[id] = c
+	span := trace.SpanFromContext(ctx)
+	ws.cancels[id] = func() {
+		defer span.End()
+		c()
+	}
 	ws.watchers[id] = w
 	return id, nil
 }
@@ -190,4 +201,10 @@ func (ws *watchStream) RequestProgress(id WatchID) {
 		return
 	}
 	ws.watchable.progress(w)
+}
+
+func (ws *watchStream) RequestProgressAll() bool {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	return ws.watchable.progressAll(ws.watchers)
 }

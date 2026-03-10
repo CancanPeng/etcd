@@ -16,29 +16,32 @@ package integration
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 
-	grpc_logsettable "github.com/grpc-ecosystem/go-grpc-middleware/logging/settable"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest"
+
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/client/pkg/v3/verify"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
-	"go.uber.org/zap/zapcore"
-	"go.uber.org/zap/zapgrpc"
-	"go.uber.org/zap/zaptest"
+	gofail "go.etcd.io/gofail/runtime"
 )
 
-var grpc_logger grpc_logsettable.SettableLoggerV2
-var insideTestContext bool
-
-func init() {
-	grpc_logger = grpc_logsettable.ReplaceGrpcLoggerV2()
-}
+var (
+	insideTestContext bool
+)
 
 type testOptions struct {
 	goLeakDetection bool
 	skipInShort     bool
+	failpoint       *failpoint
+}
+
+type failpoint struct {
+	name    string
+	payload string
 }
 
 func newTestOptions(opts ...TestOption) *testOptions {
@@ -60,12 +63,23 @@ func WithoutSkipInShort() TestOption {
 	return func(opt *testOptions) { opt.skipInShort = false }
 }
 
+// WithFailpoint registers a go fail point
+func WithFailpoint(name, payload string) TestOption {
+	return func(opt *testOptions) { opt.failpoint = &failpoint{name: name, payload: payload} }
+}
+
 // BeforeTestExternal initializes test context and is targeted for external APIs.
 // In general the `integration` package is not targeted to be used outside of
 // etcd project, but till the dedicated package is developed, this is
 // the best entry point so far (without backward compatibility promise).
 func BeforeTestExternal(t testutil.TB) {
 	BeforeTest(t, WithoutSkipInShort(), WithoutGoLeakDetection())
+}
+
+func SkipIfNoGoFail(t testutil.TB) {
+	if len(gofail.List()) == 0 {
+		t.Skip("please run 'make gofail-enable' before running the test")
+	}
 }
 
 func BeforeTest(t testutil.TB, opts ...TestOption) {
@@ -84,6 +98,14 @@ func BeforeTest(t testutil.TB, opts ...TestOption) {
 		testutil.RegisterLeakDetection(t)
 	}
 
+	if options.failpoint != nil && len(options.failpoint.name) != 0 {
+		SkipIfNoGoFail(t)
+		require.NoError(t, gofail.Enable(options.failpoint.name, options.failpoint.payload))
+		t.Cleanup(func() {
+			require.NoError(t, gofail.Disable(options.failpoint.name))
+		})
+	}
+
 	previousWD, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -95,13 +117,11 @@ func BeforeTest(t testutil.TB, opts ...TestOption) {
 
 	// Registering cleanup early, such it will get executed even if the helper fails.
 	t.Cleanup(func() {
-		grpc_logger.Reset()
 		insideTestContext = previousInsideTestContext
 		os.Chdir(previousWD)
 		revertFunc()
 	})
 
-	grpc_logger.Set(zapgrpc.NewLogger(zaptest.NewLogger(t).Named("grpc")))
 	insideTestContext = true
 
 	os.Chdir(t.TempDir())
@@ -113,26 +133,18 @@ func assertInTestContext(t testutil.TB) {
 	}
 }
 
-func MustAbsPath(path string) string {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		panic(err)
-	}
-	return abs
-}
-
-func NewEmbedConfig(t testing.TB, name string) *embed.Config {
+func NewEmbedConfig(tb testing.TB, name string) *embed.Config {
 	cfg := embed.NewConfig()
 	cfg.Name = name
-	lg := zaptest.NewLogger(t, zaptest.Level(zapcore.InfoLevel)).Named(cfg.Name)
+	lg := zaptest.NewLogger(tb, zaptest.Level(zapcore.InfoLevel)).Named(cfg.Name)
 	cfg.ZapLoggerBuilder = embed.NewZapLoggerBuilder(lg)
-	cfg.Dir = t.TempDir()
+	cfg.Dir = tb.TempDir()
 	return cfg
 }
 
-func NewClient(t testing.TB, cfg clientv3.Config) (*clientv3.Client, error) {
+func NewClient(tb testing.TB, cfg clientv3.Config) (*clientv3.Client, error) {
 	if cfg.Logger == nil {
-		cfg.Logger = zaptest.NewLogger(t).Named("client")
+		cfg.Logger = zaptest.NewLogger(tb).Named("client")
 	}
 	return clientv3.New(cfg)
 }

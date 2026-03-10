@@ -13,6 +13,8 @@
 // limitations under the License.
 
 // Package main is the entry point for the local tester network bridge.
+// Deprecated: etcd local tester is now deprecated. Use the etcd robustness
+// testing suite instead to validate etcd behaviour under failure conditions.
 package main
 
 import (
@@ -186,8 +188,10 @@ type config struct {
 	rxDelay string
 }
 
-type acceptFaultFunc func()
-type connFaultFunc func(*bridgeConn)
+type (
+	acceptFaultFunc func()
+	connFaultFunc   func(*bridgeConn)
+)
 
 func main() {
 	var cfg config
@@ -238,7 +242,6 @@ func main() {
 				log.Fatal(err)
 			}
 			l = newListener
-
 		}
 		acceptFaults = append(acceptFaults, f)
 	}

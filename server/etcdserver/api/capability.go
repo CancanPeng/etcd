@@ -17,11 +17,11 @@ package api
 import (
 	"sync"
 
-	"go.etcd.io/etcd/api/v3/version"
-	serverversion "go.etcd.io/etcd/server/v3/etcdserver/version"
+	"github.com/coreos/go-semver/semver"
 	"go.uber.org/zap"
 
-	"github.com/coreos/go-semver/semver"
+	"go.etcd.io/etcd/api/v3/version"
+	serverversion "go.etcd.io/etcd/server/v3/etcdserver/version"
 )
 
 type Capability string
@@ -41,6 +41,7 @@ var (
 		"3.4.0": {AuthCapability: true, V3rpcCapability: true},
 		"3.5.0": {AuthCapability: true, V3rpcCapability: true},
 		"3.6.0": {AuthCapability: true, V3rpcCapability: true},
+		"3.7.0": {AuthCapability: true, V3rpcCapability: true},
 	}
 
 	enableMapMu sync.RWMutex
@@ -64,7 +65,7 @@ func UpdateCapability(lg *zap.Logger, v *semver.Version) {
 		return
 	}
 	enableMapMu.Lock()
-	if curVersion != nil && !serverversion.IsValidVersionChange(v, curVersion) {
+	if curVersion != nil && !serverversion.IsValidClusterVersionChange(curVersion, v) {
 		enableMapMu.Unlock()
 		return
 	}

@@ -24,13 +24,13 @@ import (
 	"strings"
 	"time"
 
-	v3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/pkg/v3/report"
-
+	"github.com/cheggaaa/pb/v3"
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 	"golang.org/x/time/rate"
-	"gopkg.in/cheggaaa/pb.v1"
+
+	v3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/pkg/v3/report"
 )
 
 // putCmd represents the put command
@@ -71,7 +71,7 @@ func init() {
 	putCmd.Flags().BoolVar(&checkHashkv, "check-hashkv", false, "'true' to check hashkv")
 }
 
-func putFunc(cmd *cobra.Command, args []string) {
+func putFunc(cmd *cobra.Command, _ []string) {
 	if keySpaceSize <= 0 {
 		fmt.Fprintf(os.Stderr, "expected positive --key-space-size, got (%v)", keySpaceSize)
 		os.Exit(1)
@@ -86,10 +86,9 @@ func putFunc(cmd *cobra.Command, args []string) {
 	k, v := make([]byte, keySize), string(mustRandBytes(valSize))
 
 	bar = pb.New(putTotal)
-	bar.Format("Bom !")
 	bar.Start()
 
-	r := newReport()
+	r := newReport(cmd.Name())
 	for i := range clients {
 		wg.Add(1)
 		go func(c *v3.Client) {
@@ -153,13 +152,6 @@ func compactKV(clients []*v3.Client) {
 	}
 }
 
-func max(n1, n2 int64) int64 {
-	if n1 > n2 {
-		return n1
-	}
-	return n2
-}
-
 func hashKV(cmd *cobra.Command, clients []*v3.Client) {
 	eps, err := cmd.Flags().GetStringSlice("endpoints")
 	if err != nil {
@@ -171,14 +163,14 @@ func hashKV(cmd *cobra.Command, clients []*v3.Client) {
 	host := eps[0]
 
 	st := time.Now()
-	rh, eh := clients[0].HashKV(context.Background(), host, 0)
-	if eh != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get the hashkv of endpoint %s (%v)\n", host, eh)
+	rh, err := clients[0].HashKV(context.Background(), host, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get the hashkv of endpoint %s (%v)\n", host, err)
 		panic(err)
 	}
-	rt, es := clients[0].Status(context.Background(), host)
-	if es != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get the status of endpoint %s (%v)\n", host, es)
+	rt, err := clients[0].Status(context.Background(), host)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get the status of endpoint %s (%v)\n", host, err)
 		panic(err)
 	}
 

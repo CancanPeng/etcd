@@ -13,14 +13,57 @@
 // limitations under the License.
 
 //go:build integration
-// +build integration
 
 package common
 
 import (
 	"go.etcd.io/etcd/tests/v3/framework"
+	"go.etcd.io/etcd/tests/v3/framework/config"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 func init() {
 	testRunner = framework.IntegrationTestRunner
+	clusterTestCases = integrationClusterTestCases
+}
+
+func integrationClusterTestCases() []testCase {
+	return []testCase{
+		{
+			name:   "NoTLS",
+			config: config.ClusterConfig{ClusterSize: 1},
+		},
+		{
+			name:   "PeerTLS and ClientTLS",
+			config: config.ClusterConfig{ClusterSize: 3, PeerTLS: config.ManualTLS, ClientTLS: config.ManualTLS},
+		},
+		{
+			name:   "PeerAutoTLS and ClientAutoTLS",
+			config: config.ClusterConfig{ClusterSize: 3, PeerTLS: config.AutoTLS, ClientTLS: config.AutoTLS},
+		},
+	}
+}
+
+func WithAuth(userName, password string) config.ClientOption {
+	return integration.WithAuth(userName, password)
+}
+
+func WithAuthToken(token string) config.ClientOption {
+	return integration.WithAuthToken(token)
+}
+
+func WithEndpoints(endpoints []string) config.ClientOption {
+	return integration.WithEndpoints(endpoints)
+}
+
+func WithHTTP2Debug() config.ClusterOption {
+	return integration.WithHTTP2Debug()
+}
+
+func WithUnixClient() config.ClusterOption {
+	return integration.WithUnixClient()
+}
+
+func WithTCPClient() config.ClusterOption {
+	return integration.WithTCPClient()
 }

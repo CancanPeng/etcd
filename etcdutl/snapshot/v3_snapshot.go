@@ -15,6 +15,7 @@
 package snapshot
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -26,26 +27,28 @@ import (
 	"reflect"
 	"strings"
 
+	"go.uber.org/zap"
+
 	bolt "go.etcd.io/bbolt"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/client/pkg/v3/fileutil"
 	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/client/v3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/snapshot"
-	"go.etcd.io/etcd/raft/v3"
-	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/membership"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v2store"
 	"go.etcd.io/etcd/server/v3/etcdserver/cindex"
 	"go.etcd.io/etcd/server/v3/storage/backend"
+	"go.etcd.io/etcd/server/v3/storage/mvcc"
 	"go.etcd.io/etcd/server/v3/storage/schema"
 	"go.etcd.io/etcd/server/v3/storage/wal"
 	"go.etcd.io/etcd/server/v3/storage/wal/walpb"
 	"go.etcd.io/etcd/server/v3/verify"
-	"go.uber.org/zap"
+	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 // Manager defines snapshot methods.
@@ -82,7 +85,8 @@ type v3Manager struct {
 	snapDir   string
 	cl        *membership.RaftCluster
 
-	skipHashCheck bool
+	skipHashCheck   bool
+	initialMmapSize uint64
 }
 
 // hasChecksum returns "true" if the file size "n"
@@ -115,13 +119,14 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 		return ds, err
 	}
 
-	db, err := bolt.Open(dbPath, 0400, &bolt.Options{ReadOnly: true})
+	db, err := bolt.Open(dbPath, 0o400, &bolt.Options{ReadOnly: true})
 	if err != nil {
 		return ds, err
 	}
 	defer db.Close()
 
 	h := crc32.New(crc32.MakeTable(crc32.Castagnoli))
+	seenKeys := make(map[string]struct{})
 
 	if err = db.View(func(tx *bolt.Tx) error {
 		// check snapshot file integrity first
@@ -141,27 +146,47 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 		for next, _ := c.First(); next != nil; next, _ = c.Next() {
 			b := tx.Bucket(next)
 			if b == nil {
-				return fmt.Errorf("cannot get hash of bucket %s", string(next))
+				return fmt.Errorf("nil bucket: %q", string(next))
 			}
-			if _, err := h.Write(next); err != nil {
-				return fmt.Errorf("cannot write bucket %s : %v", string(next), err)
+			_, err = h.Write(next)
+			if err != nil {
+				return fmt.Errorf("cannot hash bucket name: %q err: %w", string(next), err)
 			}
-			iskeyb := (string(next) == "key")
-			if err := b.ForEach(func(k, v []byte) error {
-				if _, err := h.Write(k); err != nil {
-					return fmt.Errorf("cannot write to bucket %s", err.Error())
+
+			iskeyb := (bytes.Equal(next, schema.Key.Name()))
+			if err = b.ForEach(func(k, v []byte) error {
+				_, err = h.Write(k)
+				if err != nil {
+					return fmt.Errorf("cannot hash bucket key: %q err: %w", k, err)
 				}
-				if _, err := h.Write(v); err != nil {
-					return fmt.Errorf("cannot write to bucket %s", err.Error())
+				_, err = h.Write(v)
+				if err != nil {
+					return fmt.Errorf("cannot hash bucket key: %q value: %q err: %w", k, v, err)
 				}
 				if iskeyb {
-					rev := bytesToRev(k)
-					ds.Revision = rev.main
+					var rev mvcc.Revision
+					rev, err = bytesToRev(k)
+					if err != nil {
+						return fmt.Errorf("cannot parse revision key: %q err: %w", k, err)
+					}
+					ds.Revision = rev.Main
+
+					var kv mvccpb.KeyValue
+					err = kv.Unmarshal(v)
+					if err != nil {
+						return fmt.Errorf("cannot unmarshal value, key: %q value: %q err: %w", k, v, err)
+					}
+					key := string(kv.Key)
+					// refer to https://etcd.io/docs/v3.5/learning/data_model/
+					if !mvcc.IsTombstone(k) {
+						seenKeys[key] = struct{}{}
+					} else {
+						delete(seenKeys, key)
+					}
 				}
-				ds.TotalKey++
 				return nil
 			}); err != nil {
-				return fmt.Errorf("cannot write bucket %s : %v", string(next), err)
+				return fmt.Errorf("error during bucket key iteration, name: %q err: %w", string(next), err)
 			}
 		}
 		return nil
@@ -169,8 +194,18 @@ func (s *v3Manager) Status(dbPath string) (ds Status, err error) {
 		return ds, err
 	}
 
+	ds.TotalKey = len(seenKeys)
 	ds.Hash = h.Sum32()
 	return ds, nil
+}
+
+func bytesToRev(b []byte) (rev mvcc.Revision, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%s", r)
+		}
+	}()
+	return mvcc.BytesToRev(b), err
 }
 
 // RestoreConfig configures snapshot restore operation.
@@ -202,6 +237,19 @@ type RestoreConfig struct {
 	// SkipHashCheck is "true" to ignore snapshot integrity hash value
 	// (required if copied from data directory).
 	SkipHashCheck bool
+
+	// InitialMmapSize is the database initial memory map size.
+	InitialMmapSize uint64
+
+	// RevisionBump is the amount to increase the latest revision after restore,
+	// to allow administrators to trick clients into thinking that revision never decreased.
+	// If 0, revision bumping is skipped.
+	// (required if MarkCompacted == true)
+	RevisionBump uint64
+
+	// MarkCompacted is "true" to mark the latest revision as compacted.
+	// (required if RevisionBump > 0)
+	MarkCompacted bool
 }
 
 // Restore restores a new etcd data directory from given snapshot file.
@@ -252,6 +300,7 @@ func (s *v3Manager) Restore(cfg RestoreConfig) error {
 	s.walDir = walDir
 	s.snapDir = filepath.Join(dataDir, "member", "snap")
 	s.skipHashCheck = cfg.SkipHashCheck
+	s.initialMmapSize = cfg.InitialMmapSize
 
 	s.lg.Info(
 		"restoring snapshot",
@@ -259,11 +308,19 @@ func (s *v3Manager) Restore(cfg RestoreConfig) error {
 		zap.String("wal-dir", s.walDir),
 		zap.String("data-dir", dataDir),
 		zap.String("snap-dir", s.snapDir),
+		zap.Uint64("initial-memory-map-size", s.initialMmapSize),
 	)
 
 	if err = s.saveDB(); err != nil {
 		return err
 	}
+
+	if cfg.MarkCompacted && cfg.RevisionBump > 0 {
+		if err = s.modifyLatestRevision(cfg.RevisionBump); err != nil {
+			return err
+		}
+	}
+
 	hardstate, err := s.saveWALAndSnap()
 	if err != nil {
 		return err
@@ -279,6 +336,7 @@ func (s *v3Manager) Restore(cfg RestoreConfig) error {
 		zap.String("wal-dir", s.walDir),
 		zap.String("data-dir", dataDir),
 		zap.String("snap-dir", s.snapDir),
+		zap.Uint64("initial-memory-map-size", s.initialMmapSize),
 	)
 
 	return verify.VerifyIfEnabled(verify.Config{
@@ -299,7 +357,7 @@ func (s *v3Manager) saveDB() error {
 		return err
 	}
 
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath())
+	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 
 	err = schema.NewMembershipBackend(s.lg, be).TrimMembershipFromBackend()
@@ -308,6 +366,70 @@ func (s *v3Manager) saveDB() error {
 	}
 
 	return nil
+}
+
+// modifyLatestRevision can increase the latest revision by the given amount and sets the scheduled compaction
+// to that revision so that the server will consider this revision compacted.
+func (s *v3Manager) modifyLatestRevision(bumpAmount uint64) error {
+	be := backend.NewDefaultBackend(s.lg, s.outDbPath())
+	defer func() {
+		be.ForceCommit()
+		be.Close()
+	}()
+
+	tx := be.BatchTx()
+	tx.LockOutsideApply()
+	defer tx.Unlock()
+
+	latest, err := s.unsafeGetLatestRevision(tx)
+	if err != nil {
+		return err
+	}
+
+	latest = s.unsafeBumpBucketsRevision(tx, latest, int64(bumpAmount))
+	s.unsafeMarkRevisionCompacted(tx, latest)
+
+	return nil
+}
+
+func (s *v3Manager) unsafeBumpBucketsRevision(tx backend.UnsafeWriter, latest mvcc.Revision, amount int64) mvcc.Revision {
+	s.lg.Info(
+		"bumping latest revision",
+		zap.Int64("latest-revision", latest.Main),
+		zap.Int64("bump-amount", amount),
+		zap.Int64("new-latest-revision", latest.Main+amount),
+	)
+
+	latest.Main += amount
+	latest.Sub = 0
+	k := mvcc.NewRevBytes()
+	k = mvcc.RevToBytes(latest, k)
+	tx.UnsafePut(schema.Key, k, []byte{})
+
+	return latest
+}
+
+func (s *v3Manager) unsafeMarkRevisionCompacted(tx backend.UnsafeWriter, latest mvcc.Revision) {
+	s.lg.Info(
+		"marking revision compacted",
+		zap.Int64("revision", latest.Main),
+	)
+
+	mvcc.UnsafeSetScheduledCompact(tx, latest.Main)
+}
+
+func (s *v3Manager) unsafeGetLatestRevision(tx backend.UnsafeReader) (mvcc.Revision, error) {
+	var latest mvcc.Revision
+	err := tx.UnsafeForEach(schema.Key, func(k, _ []byte) (err error) {
+		rev := mvcc.BytesToRev(k)
+
+		if rev.GreaterThan(latest) {
+			latest = rev
+		}
+
+		return nil
+	})
+	return latest, err
 }
 
 func (s *v3Manager) copyAndVerifyDB() error {
@@ -335,17 +457,12 @@ func (s *v3Manager) copyAndVerifyDB() error {
 
 	outDbPath := s.outDbPath()
 
-	db, dberr := os.OpenFile(outDbPath, os.O_RDWR|os.O_CREATE, 0600)
+	db, dberr := os.OpenFile(outDbPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if dberr != nil {
 		return dberr
 	}
-	dbClosed := false
-	defer func() {
-		if !dbClosed {
-			db.Close()
-			dbClosed = true
-		}
-	}()
+	defer db.Close()
+
 	if _, err := io.Copy(db, srcf); err != nil {
 		return err
 	}
@@ -382,7 +499,7 @@ func (s *v3Manager) copyAndVerifyDB() error {
 	}
 
 	// db hash is OK, can now modify DB so it can be part of a new cluster
-	db.Close()
+
 	return nil
 }
 
@@ -394,18 +511,16 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 		return nil, err
 	}
 
-	// add members again to persist them to the store we create.
-	st := v2store.New(etcdserver.StoreClusterPrefix, etcdserver.StoreKeysPrefix)
-	s.cl.SetStore(st)
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath())
+	// add members again to persist them to the backend we create.
+	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 	s.cl.SetBackend(schema.NewMembershipBackend(s.lg, be))
 	for _, m := range s.cl.Members() {
 		s.cl.AddMember(m, true)
 	}
 
-	m := s.cl.MemberByName(s.name)
-	md := &etcdserverpb.Metadata{NodeID: uint64(m.ID), ClusterID: uint64(s.cl.ID())}
+	m := s.cl.MemberByName(s.name) //nolint:staticcheck // See https://github.com/dominikh/go-tools/issues/1698
+	md := &etcdserverpb.Metadata{NodeID: new(uint64(m.ID)), ClusterID: new(uint64(s.cl.ID()))}
 	metadata, merr := md.Marshal()
 	if merr != nil {
 		return nil, merr
@@ -456,15 +571,11 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 		return nil, err
 	}
 
-	b, berr := st.Save()
-	if berr != nil {
-		return nil, berr
-	}
 	confState := raftpb.ConfState{
 		Voters: nodeIDs,
 	}
 	raftSnap := raftpb.Snapshot{
-		Data: b,
+		Data: etcdserver.GetMembershipInfoInV2Format(s.lg, s.cl),
 		Metadata: raftpb.SnapshotMetadata{
 			Index:     commit,
 			Term:      term,
@@ -475,12 +586,12 @@ func (s *v3Manager) saveWALAndSnap() (*raftpb.HardState, error) {
 	if err := sn.SaveSnap(raftSnap); err != nil {
 		return nil, err
 	}
-	snapshot := walpb.Snapshot{Index: commit, Term: term, ConfState: &confState}
+	snapshot := walpb.Snapshot{Index: &commit, Term: &term, ConfState: &confState}
 	return &hardState, w.SaveSnapshot(snapshot)
 }
 
 func (s *v3Manager) updateCIndex(commit uint64, term uint64) error {
-	be := backend.NewDefaultBackend(s.lg, s.outDbPath())
+	be := backend.NewDefaultBackend(s.lg, s.outDbPath(), backend.WithMmapSize(s.initialMmapSize))
 	defer be.Close()
 
 	cindex.UpdateConsistentIndexForce(be.BatchTx(), commit, term)

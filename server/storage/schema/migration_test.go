@@ -15,19 +15,19 @@
 package schema
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/coreos/go-semver/semver"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
+
+	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
-	"go.uber.org/zap/zaptest"
-)
-
-var (
-	V4_0 = semver.Version{Major: 4, Minor: 0}
 )
 
 func TestNewPlan(t *testing.T) {
@@ -42,25 +42,30 @@ func TestNewPlan(t *testing.T) {
 	}{
 		{
 			name:    "Update v3.5 to v3.6 should work",
-			current: V3_5,
-			target:  V3_6,
+			current: version.V3_5,
+			target:  version.V3_6,
 		},
 		{
 			name:    "Downgrade v3.6 to v3.5 should fail as downgrades are not yet supported",
-			current: V3_6,
-			target:  V3_5,
+			current: version.V3_6,
+			target:  version.V3_5,
 		},
 		{
-			name:           "Upgrade v3.6 to v3.7 should fail as v3.7 is unknown",
-			current:        V3_6,
-			target:         V3_7,
+			name:    "Upgrade v3.6 to v3.7 should work",
+			current: version.V3_6,
+			target:  version.V3_7,
+		},
+		{
+			name:           "Upgrade v3.7 to v3.8 should fail as v3.8 is unknown",
+			current:        version.V3_7,
+			target:         version.V3_8,
 			expectError:    true,
-			expectErrorMsg: `version "3.7.0" is not supported`,
+			expectErrorMsg: `version "3.8.0" is not supported`,
 		},
 		{
 			name:           "Upgrade v3.6 to v4.0 as major version changes are unsupported",
-			current:        V3_6,
-			target:         V4_0,
+			current:        version.V3_6,
+			target:         version.V4_0,
 			expectError:    true,
 			expectErrorMsg: "changing major storage version is not supported",
 		},
@@ -152,7 +157,7 @@ func TestMigrationStepExecute(t *testing.T) {
 		{
 			name:           "Downgrade below to below v3.6 doesn't leave storage version as it was not supported then",
 			currentVersion: semver.Version{Major: 3, Minor: 6},
-			changes:        schemaChanges[V3_6],
+			changes:        schemaChanges[version.V3_6],
 			isUpgrade:      false,
 			expectVersion:  nil,
 		},
@@ -169,9 +174,7 @@ func TestMigrationStepExecute(t *testing.T) {
 			be, _ := betesting.NewTmpBackend(t, time.Microsecond, 10)
 			defer be.Close()
 			tx := be.BatchTx()
-			if tx == nil {
-				t.Fatal("batch tx is nil")
-			}
+			require.NotNilf(t, tx, "batch tx is nil")
 			tx.Lock()
 			defer tx.Unlock()
 
@@ -180,7 +183,7 @@ func TestMigrationStepExecute(t *testing.T) {
 
 			step := newMigrationStep(tc.currentVersion, tc.isUpgrade, tc.changes)
 			err := step.unsafeExecute(lg, tx)
-			if err != tc.expectError {
+			if !errors.Is(err, tc.expectError) {
 				t.Errorf("Unexpected error or lack thereof, expected: %v, got: %v", tc.expectError, err)
 			}
 			v := UnsafeReadStorageVersion(tx)
@@ -223,7 +226,7 @@ type actionMock struct {
 	err      error
 }
 
-func (a actionMock) unsafeDo(tx backend.BatchTx) (action, error) {
+func (a actionMock) unsafeDo(tx backend.UnsafeReadWriter) (action, error) {
 	a.recorder.actions = append(a.recorder.actions, a.name)
 	return actionMock{
 		recorder: a.recorder,

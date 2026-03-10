@@ -22,13 +22,26 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
 	"go.etcd.io/etcd/tests/v3/framework/e2e"
 )
 
-func TestCtlV3CompletionBash(t *testing.T) { testShellCompletion(t, e2e.CtlBinPath, "bash") }
+func TestCtlV3CompletionBash(t *testing.T) {
+	testShellCompletion(t, e2e.BinPath.Etcdctl, "bash")
+}
 
-func TestUtlV3CompletionBash(t *testing.T) { testShellCompletion(t, e2e.UtlBinPath, "bash") }
+func TestUtlV3CompletionBash(t *testing.T) {
+	testShellCompletion(t, e2e.BinPath.Etcdutl, "bash")
+}
 
+// testShellCompletion can only run in non-coverage mode. The etcdctl and etcdutl
+// built with `-tags cov` mode will show go-test result after each execution, like
+//
+//	PASS
+//	coverage: 0.0% of statements in ./...
+//
+// Since the PASS is not real command, the `source completion" fails with
+// command-not-found error.
 func testShellCompletion(t *testing.T, binPath, shellName string) {
 	e2e.BeforeTest(t)
 
@@ -39,7 +52,7 @@ func testShellCompletion(t *testing.T, binPath, shellName string) {
 	require.NoError(t, completionCmd.Run())
 
 	filename := fmt.Sprintf("etcdctl-%s.completion", shellName)
-	require.NoError(t, os.WriteFile(filename, stdout.Bytes(), 0644))
+	require.NoError(t, os.WriteFile(filename, stdout.Bytes(), 0o644))
 
 	shellCmd := exec.Command(shellName, "-c", "source "+filename)
 	require.NoError(t, shellCmd.Run())

@@ -2,17 +2,470 @@
 
 Previous change logs can be found at [CHANGELOG-3.4](https://github.com/etcd-io/etcd/blob/main/CHANGELOG/CHANGELOG-3.4.md).
 
-<hr>
+---
 
-## v3.5.5 (TBD)
+## v3.5.28 (TBC)
 
 ### etcd server
+
+- [Ensure the metrics interceptor runs before other interceptors so that metrics remain up to date](https://github.com/etcd-io/etcd/pull/21336)
+- Fix [Race between read index and leader change](https://github.com/etcd-io/etcd/pull/21387)
+- Fix [Stale reads caused by process pausing](https://github.com/etcd-io/etcd/pull/21421)
+
+### Package `clientv3`
+
+- [Print the endpoint the grpc request was actually sent to in unary interceptor](https://github.com/etcd-io/etcd/pull/21380)
+
+### etcd grpc-proxy
+
+- [server/etcdmain: fix startup deadlock in grpcproxy](https://github.com/etcd-io/etcd/pull/21356)
+
+### etcdctl
+
+- Fix [slice bounds trimming single-quoted args in Argify](https://github.com/etcd-io/etcd/pull/21403)
+
+### Dependencies
+
+- [Bump go.opentelemetry.io/otel/sdk to v1.40.0 to resolve https://pkg.go.dev/vuln/GO-2026-4394](https://github.com/etcd-io/etcd/pull/21338)
+- Compile binaries using [go 1.25.7](https://github.com/etcd-io/etcd/pull/21405)
+- [Bump golang.org/x/net to v0.51.0 to resolve GO-2026-4559](https://github.com/etcd-io/etcd/pull/21441)
+
+---
+
+## v3.5.27 (2026-02-13)
+
+### Package `clientv3`
+
+- [Remove the use of grpc-go's Metadata field](https://github.com/etcd-io/etcd/pull/21242)
+
+### Dependencies
+
+- Compile binaries using [go 1.24.13](https://github.com/etcd-io/etcd/pull/21266). This addresses [CVE-2025-61726](https://github.com/advisories/GHSA-gm9r-q53w-2gh4), [CVE-2025-61731](https://github.com/advisories/GHSA-xvqr-69v8-f3gv), and [CVE-2025-61732](https://github.com/advisories/GHSA-8jvr-vh7g-f8gx).
+
+---
+
+## v3.5.26 (2025-12-17)
+
+### etcd server
+
+- [Print token fingerprint instead of the original tokens in log messages](https://github.com/etcd-io/etcd/pull/20942)
+- Fix [zombie members in v3store](https://github.com/etcd-io/etcd/pull/20995)
+
+### etcdctl
+
+- [Fix a typo of 'etcdctl snapshot restore' command](https://github.com/etcd-io/etcd/pull/20948).
+
+### Dependencies
+
+- Compile binaries using [go 1.24.11](https://github.com/etcd-io/etcd/pull/20999).
+- Bump [golang.org/x/crypto to 0.45.0 to address CVE-2025-47914, and CVE-2025-58181](https://github.com/etcd-io/etcd/pull/21023).
+
+---
+
+## v3.5.25 (2025-11-11)
+
+### etcd server
+
+- Fix [`--force-new-cluster can't clean up learners after creating snapshot`](https://github.com/etcd-io/etcd/pull/20896)
+
+### etcdutl
+
+- Add [flag `--wal-dir` to `etcdutl check v2store` command to support dedicated WAL directory](https://github.com/etcd-io/etcd/pull/20886)
+
+### Dependencies
+
+- Compile binaries using [go 1.24.10](https://github.com/etcd-io/etcd/pull/20902).
+
+---
+
+## v3.5.24 (2025-10-22)
+
+### etcd server
+
+- [Reject watch request with -1 revision to prevent invalid resync behavior on uncompacted etcd](https://github.com/etcd-io/etcd/pull/20709)
+- [Change the TLS handshake 'EOF' errors to DEBUG not to spam logs](https://github.com/etcd-io/etcd/pull/20751)
+- Fix [Learner promotion not being persisted into v3store may be propagated across multiple upgrades](https://github.com/etcd-io/etcd/pull/20797)
+
+### Dependencies
+
+- Compile binaries using [go 1.24.9](https://github.com/etcd-io/etcd/pull/20806).
+
+---
+
+## v3.5.23 (2025-09-19)
+
+### etcd server
+
+- Fix [etcd may return success for leaseRenew request even when the lease is revoked](https://github.com/etcd-io/etcd/pull/20616)
+- Fix [potential data corruption when applySnapshot and defragment happen concurrently](https://github.com/etcd-io/etcd/pull/20653)
+
+### Dependencies
+
+- Compile binaries using [go 1.24.7](https://github.com/etcd-io/etcd/pull/20665).
+- [Bump bbolt to v1.3.12](https://github.com/etcd-io/etcd/pull/20514).
+
+---
+
+## v3.5.22 (2025-07-22)
+
+### etcd server
+
+- Fix [the compaction pause duration metric is not emitted for every compaction batch](https://github.com/etcd-io/etcd/pull/19771)
+- Fix [mvcc: avoid double decrement of watcher gauge on close/cancel race](https://github.com/etcd-io/etcd/pull/20066)
+- Fix [Watch on future revision returns old events or notifications](https://github.com/etcd-io/etcd/pull/20290)
+- Fix [`--force-new-cluster` can't remove all other members in a corner case](https://github.com/etcd-io/etcd/pull/20339)
+- Fix [v2store check (IsMetaStoreOnly) returns wrong result even there is no any auth data](https://github.com/etcd-io/etcd/pull/20357)
+- Improve [help message for --quota-backend-bytes](https://github.com/etcd-io/etcd/pull/20380)
+
+### Package `clientv3`
+
+- [Replace `resolver.State.Addresses` with `resolver.State.Endpoint.Addresses`](https://github.com/etcd-io/etcd/pull/19783).
+- [Deprecated the Metadata field in the Endpoint struct from the client/v3/naming/endpoints package](https://github.com/etcd-io/etcd/pull/19846).
+
+### Dependencies
+
+- Compile binaries using [go 1.23.11](https://github.com/etcd-io/etcd/pull/20321)
+
+---
+
+## v3.5.21 (2025-03-27)
+
+### Dependencies
+
+- Bump [github.com/golang-jwt/jwt/v4 from 4.5.1 to 4.5.2 to address CVE-2025-30204](https://github.com/etcd-io/etcd/pull/19646).
+- Bump [bump golang.org/x/net from v0.36.0 to v0.38.0 to address CVE-2025-22870 and CVE-2025-22872](https://github.com/etcd-io/etcd/pull/19686).
+
+---
+
+## v3.5.20 (2025-03-21)
+
+### etcd server
+
+- Fix [the learner promotion changes not being persisted into v3store (bbolt)](https://github.com/etcd-io/etcd/pull/19563)
+- Update [the RLock in Demoted method for read-only access to expiry](https://github.com/etcd-io/etcd/pull/19445)
+
+### etcdctl
+
+- Fix [command `etcdctl member promote` doesn't support json output](https://github.com/etcd-io/etcd/pull/19602)
+
+### etcd grpc-proxy
+
+- Fix [grpcproxy can get stuck in and endless loop causing high CPU usage](https://github.com/etcd-io/etcd/pull/19562)
+
+---
+
+## v3.5.19 (2025-03-05)
+
+### etcd server
+- Backport [add learner status check to readyz endpoint](https://github.com/etcd-io/etcd/pull/19280).
+- Fix [performance regression due to uncertain compaction sleep interval](https://github.com/etcd-io/etcd/pull/19405).
+
+### `tools/benchmark`
+- Backport [add mixed read-write performance evaluation scripts](https://github.com/etcd-io/etcd/pull/19275).
+
+### Dependencies
+- Compile binaries using [go 1.23.7](https://github.com/etcd-io/etcd/pull/19528).
+- Bump [golang.org/x/crypto to v0.35.0 to address CVE-2025-22869](https://github.com/etcd-io/etcd/pull/19478).
+- Bump [golang.org/x/net to v0.36.0 to address CVE-2025-22870](https://github.com/etcd-io/etcd/pull/19530).
+
+---
+
+## v3.5.18 (2025-01-24)
+
+### etcd server
+- Avoid deadlock in etcd.Close when stopping during bootstrapping, see https://github.com/etcd-io/etcd/pull/19167 and https://github.com/etcd-io/etcd/pull/19258.
+- [Print warning messages if any of the deprecated v2store related flags is set](https://github.com/etcd-io/etcd/pull/18999)
+- Fix [missing delete event on watch opened on same revision as compaction request](https://github.com/etcd-io/etcd/pull/19249)
+
+### Package `clientv3`
+- Fix [runtime panic that occurs when KeepAlive is called with a Context implemented by an uncomparable type](https://github.com/etcd-io/etcd/pull/18937)
+
+### etcdutl v3
+- Add [command `etcdutl check v2store` to offline check whether v2store contains custom content](https://github.com/etcd-io/etcd/pull/19113)
+
+### etcd grpc-proxy
+- Add [`tls min/max version to grpc proxy`](https://github.com/etcd-io/etcd/pull/18829) to support setting TLS min and max version.
+
+### Dependencies
+- Bump [golang-jwt/jwt to 4.5.1 to address GO-2024-3250](https://github.com/etcd-io/etcd/pull/18899).
+- Compile binaries using [go 1.22.11](https://github.com/etcd-io/etcd/pull/19211).
+- Bump [golang.org/x/crypto to 0.32.0 to address CVE-2024-45337](https://github.com/etcd-io/etcd/pull/19154).
+- Bump [golang.org/x/net to 0.34.0 to address CVE-2024-45338](https://github.com/etcd-io/etcd/pull/19158).
+
+---
+
+## v3.5.17 (2024-11-12)
+
+### etcd server
+- Fix [watchserver related goroutine leakage](https://github.com/etcd-io/etcd/pull/18784)
+- Fix [risk of a partial write txn being applied](https://github.com/etcd-io/etcd/pull/18799)
+- Fix [panicking occurred due to improper error handling during defragmentation](https://github.com/etcd-io/etcd/pull/18842)
+- Fix [close temp file(s) in case an error happens during defragmentation](https://github.com/etcd-io/etcd/pull/18854)
+
+### Dependencies
+- Compile binaries using [go 1.22.9](https://github.com/etcd-io/etcd/pull/18849).
+
+---
+
+## v3.5.16 (2024-09-10)
+
+### etcd server
+- Fix [performance regression issue caused by the `ensureLeadership` in lease renew](https://github.com/etcd-io/etcd/pull/18439).
+- [Keep the tombstone during compaction if it happens to be the compaction revision](https://github.com/etcd-io/etcd/pull/18474)
+- Add [`etcd --experimental-compaction-sleep-interval`](https://github.com/etcd-io/etcd/pull/18514) flag to control the sleep interval between each compaction batch.
+
+### Dependencies
+- Compile binaries using [go 1.22.7](https://github.com/etcd-io/etcd/pull/18550).
+- Upgrade [bbolt to v1.3.11](https://github.com/etcd-io/etcd/pull/18489).
+
+---
+
+## v3.5.15 (2024-07-19)
+
+### etcd server
+- Fix [add prometheus metric registration for metric `etcd_disk_wal_write_duration_seconds`](https://github.com/etcd-io/etcd/pull/18174).
+- Add [Support multiple values for allowed client and peer TLS identities](https://github.com/etcd-io/etcd/pull/18160)
+- Fix [noisy logs from simple auth token expiration by reducing log level to debug](https://github.com/etcd-io/etcd/pull/18245)
+- [Differentiate the warning message for rejected client and peer connections](https://github.com/etcd-io/etcd/pull/18319)
+
+### Package clientv3
+- [Print gRPC metadata in guaranteed order using the official go fmt pkg](https://github.com/etcd-io/etcd/pull/18312).
+
+### Dependencies
+- Compile binaries using [go 1.21.12](https://github.com/etcd-io/etcd/pull/18271).
+- [Fully address CVE-2023-45288 and fix govulncheck CI check](https://github.com/etcd-io/etcd/pull/18170)
+
+## v3.5.14 (2024-05-29)
+
+### etcd server
+- Fix [LeaseTimeToLive returns error if leader changed](https://github.com/etcd-io/etcd/pull/17704).
+- Add [metrics `etcd_disk_wal_write_duration_seconds`](https://github.com/etcd-io/etcd/pull/17616).
+- Fix [ignore raft messages if member id mismatch](https://github.com/etcd-io/etcd/pull/17813).
+- Update [the compaction log when bootstrap](https://github.com/etcd-io/etcd/pull/17830).
+- Fix [Revision decreasing after panic during compaction](https://github.com/etcd-io/etcd/pull/17865)
+- Add [`etcd --experimental-stop-grpc-service-on-defrag`](https://github.com/etcd-io/etcd/pull/17914) to enable client failover on defrag.
+- Add [support for `AllowedCN` and `AllowedHostname` through config file](https://github.com/etcd-io/etcd/pull/18063)
+
+### etcdutl v3
+- Add [`--initial-memory-map-size` to `snapshot restore` to avoid memory allocation issues](https://github.com/etcd-io/etcd/pull/17977)
+
+### Package `clientv3`
+- Add [requests retry when receiving ErrGPRCNotSupportedForLearner and endpoints > 1](https://github.com/etcd-io/etcd/pull/17641).
+- Fix [initialization for mu in client context](https://github.com/etcd-io/etcd/pull/17699).
+
+### Dependencies
+- Compile binaries using [go 1.21.10](https://github.com/etcd-io/etcd/pull/17980).
+- Upgrade [bbolt to v1.3.10](https://github.com/etcd-io/etcd/pull/17943).
+
+---
+
+## v3.5.13 (2024-03-29)
+
+### etcd server
+- Fix leases wrongly revoked by the leader by [ignoring old leader's leases revoking request](https://github.com/etcd-io/etcd/pull/17425).
+- Fix [no progress notification being sent for watch that doesn't get any events](https://github.com/etcd-io/etcd/pull/17566).
+- Fix [watch event loss after compaction](https://github.com/etcd-io/etcd/pull/17612).
+
+### Package `clientv3`
+- Add [client backoff and retry config options](https://github.com/etcd-io/etcd/pull/17363).
+- [Ignore SetKeepAlivePeriod errors on OpenBSD](https://github.com/etcd-io/etcd/pull/17387).
+- [Support unix/unixs socket in client or peer URLs](https://github.com/etcd-io/etcd/pull/15940)
+
+### gRPC Proxy
+- Add [three flags (see below) for grpc-proxy](https://github.com/etcd-io/etcd/pull/17447)
+  - `--dial-keepalive-time`
+  - `--dial-keepalive-timeout`
+  - `--permit-without-stream`
+
+### Dependencies
+- Upgrade [bbolt to v1.3.9](https://github.com/etcd-io/etcd/pull/17483).
+- Compile binaries using [go 1.21.8](https://github.com/etcd-io/etcd/pull/17537).
+- Upgrade [google.golang.org/protobuf to v1.33.0 to address CVE-2024-24786](https://github.com/etcd-io/etcd/pull/17553).
+- Upgrade github.com/sirupsen/logrus to v1.9.3 to address [PRISMA-2023-0056](https://github.com/etcd-io/etcd/pull/17482).
+
+### Others
+- [Make CGO_ENABLED configurable](https://github.com/etcd-io/etcd/pull/17421).
+
+---
+
+## v3.5.12 (2024-01-31)
+
+### etcd server
+- Fix [not validating database consistent index, and panicking on nil backend](https://github.com/etcd-io/etcd/pull/17151)
+- Document [`experimental-enable-lease-checkpoint-persist` flag in etcd help](https://github.com/etcd-io/etcd/pull/17190)
+- Fix [needlessly flocking snapshot files when deleting](https://github.com/etcd-io/etcd/pull/17206)
+- Add [digest for etcd base image](https://github.com/etcd-io/etcd/pull/17205)
+- Fix [delete inconsistencies in read buffer](https://github.com/etcd-io/etcd/pull/17230)
+- Add [mvcc: print backend database size and size in use in compaction logs](https://github.com/etcd-io/etcd/pull/17291)
+
+### Dependencies
+- Compile binaries using [go 1.20.13](https://github.com/etcd-io/etcd/pull/17275)
+- Upgrade [golang.org/x/crypto to v0.17+ to address CVE-2023-48795](https://github.com/etcd-io/etcd/pull/17346)
+
+## v3.5.11 (2023-12-07)
+
+### etcd server
+- Fix distributed tracing by ensuring `--experimental-distributed-tracing-sampling-rate` configuration option is available to [set tracing sample rate](https://github.com/etcd-io/etcd/pull/16951).
+- Fix [url redirects while checking peer urls during new member addition](https://github.com/etcd-io/etcd/pull/16986)
+- Add [livez/readyz HTTP endpoints](https://github.com/etcd-io/etcd/pull/17039)
+
+### Dependencies
+- Compile binaries using [go 1.20.12](https://github.com/etcd-io/etcd/pull/17077)
+- Fix [CVE-2023-47108](https://github.com/advisories/GHSA-8pgv-569h-w5rw) by [bumping go.opentelemetry.io/otel to 1.20.0 and go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc to 0.46.0](https://github.com/etcd-io/etcd/pull/16946).
+
+---
+
+## v3.5.10 (2023-10-27)
+
+### etcd server
+- Fix [`--socket-reuse-port` and `--socket-reuse-address` not able to be set in configuration file](https://github.com/etcd-io/etcd/pull/16435).
+- Fix [corruption check may get a `ErrCompacted` error when server has just been compacted](https://github.com/etcd-io/etcd/pull/16048)
+- Improve [Lease put performance for the case that auth is disabled or the user is admin](https://github.com/etcd-io/etcd/pull/16019)
+- Improve [Skip getting authInfo from incoming context when auth is disabled](https://github.com/etcd-io/etcd/pull/16241)
+- Fix [Hash and HashKV have duplicated RESTful API](https://github.com/etcd-io/etcd/pull/16490)
+
+### etcdutl v3
+- Add [optional --bump-revision and --mark-compacted flag to etcdutl snapshot restore operation](https://github.com/etcd-io/etcd/pull/16165).
+
+### etcdctl v3
+- Add [optional --bump-revision and --mark-compacted flag to etcdctl snapshot restore operation](https://github.com/etcd-io/etcd/pull/16165).
+
+### etcd grpc-proxy
+- Fix [Memberlist results not updated when proxy node down](https://github.com/etcd-io/etcd/pull/15907).
+
+### Package `clientv3`
+- Fix [Multiple endpoints with same prefix got mixed up](https://github.com/etcd-io/etcd/pull/15939)
+- Fix [Unexpected blocking when barrier waits on a nonexistent key](https://github.com/etcd-io/etcd/pull/16188)
+- Fix [Reset auth token when failing to authenticate due to auth being disabled](https://github.com/etcd-io/etcd/pull/16241)
+- Fix [panic in etcd validate secure endpoints](https://github.com/etcd-io/etcd/pull/16565)
+
+### Dependencies
+- Compile binaries using [go 1.20.10](https://github.com/etcd-io/etcd/pull/16745).
+- Upgrade gRPC to 1.58.3 in https://github.com/etcd-io/etcd/pull/16625, https://github.com/etcd-io/etcd/pull/16781 and https://github.com/etcd-io/etcd/pull/16790. Note that gRPC server will reject requests with connection header (refer to https://github.com/grpc/grpc-go/pull/4803).
+- Upgrade [bbolt to v1.3.8](https://github.com/etcd-io/etcd/pull/16833)
+
+---
+
+## v3.5.9 (2023-05-11)
+
+### etcd server
+- Fix [LeaseTimeToLive API may return keys to clients which have no read permission on the keys](https://github.com/etcd-io/etcd/pull/15815).
+
+### Dependencies
+- Compile binaries using [go 1.19.9](https://github.com/etcd-io/etcd/pull/15822).
+
+---
+
+## v3.5.8 (2023-04-13)
+
+### etcd server
+- Add [`etcd --tls-min-version --tls-max-version`](https://github.com/etcd-io/etcd/pull/15483) to enable support for TLS 1.3.
+- Add [`etcd --listen-client-http-urls`](https://github.com/etcd-io/etcd/pull/15589) flag to support separating http server from grpc one, thus giving full immunity to [watch stream starvation under high read load](https://github.com/etcd-io/etcd/issues/15402).
+- Change [http2 frame scheduler to random algorithm](https://github.com/etcd-io/etcd/pull/15452)
+- Fix [Watch response traveling back in time when reconnecting member downloads snapshot from the leader](https://github.com/etcd-io/etcd/pull/15515)
+- Fix [race when starting both secure & insecure gRPC servers on the same address](https://github.com/etcd-io/etcd/pull/15517)
+- Fix [server/auth: disallow creating empty permission ranges](https://github.com/etcd-io/etcd/pull/15619)
+- Fix [aligning zap log timestamp resolution to microseconds](https://github.com/etcd-io/etcd/pull/15240). Etcd now uses zap timestamp format: `2006-01-02T15:04:05.999999Z0700` (microsecond instead of milliseconds precision).
+- Fix [wsproxy did not print log in JSON format](https://github.com/etcd-io/etcd/pull/15661).
+- Fix [CVE-2021-28235](https://nvd.nist.gov/vuln/detail/CVE-2021-28235) by [clearing password after authenticating the user](https://github.com/etcd-io/etcd/pull/15653).
+- Fix [etcdserver may panic when parsing a JWT token without username or revision](https://github.com/etcd-io/etcd/pull/15676).
+- Fix [Requested watcher progress notifications are not synchronised with stream](https://github.com/etcd-io/etcd/pull/15695).
+
+### Package `netutil`
+- Fix [consistently format IPv6 addresses for comparison](https://github.com/etcd-io/etcd/pull/15187).
+
+### Package `clientv3`
+- Fix [etcd might send duplicated events to watch clients](https://github.com/etcd-io/etcd/pull/15274).
+
+### Dependencies
+- Recommend [Go 1.19+](https://github.com/etcd-io/etcd/pull/15337).
+- Compile binaries using [go to 1.19.8](https://github.com/etcd-io/etcd/pull/15651)
+- Upgrade [golang.org/x/net to v0.7.0](https://github.com/etcd-io/etcd/pull/15337)
+- Upgrade [bbolt to v1.3.7](https://github.com/etcd-io/etcd/pull/15222).
+
+### Docker image
+- [Remove nsswitch.conf from docker image](https://github.com/etcd-io/etcd/pull/15161)
+- Fix [etcd docker images all tagged with amd64 architecture](https://github.com/etcd-io/etcd/pull/15612)
+
+---
+
+## v3.5.7 (2023-01-20)
+
+### etcd server
+- Fix [Remove memberID from data corrupt alarm](https://github.com/etcd-io/etcd/pull/14852).
+- Fix [Allow non mutating requests pass through quotaKVServer when NOSPACE](https://github.com/etcd-io/etcd/pull/14884).
+- Fix [nil pointer panic for readonly txn due to nil response](https://github.com/etcd-io/etcd/pull/14899).
+- Fix [The last record which was partially synced to disk isn't automatically repaired](https://github.com/etcd-io/etcd/pull/15069).
+- Fix [etcdserver might promote a non-started learner](https://github.com/etcd-io/etcd/pull/15096).
+
+### Package `clientv3`
+- Reverted the fix to [auth invalid token and old revision errors in watch](https://github.com/etcd-io/etcd/pull/14995).
+
+### Dependencies
+- Recommend [Go 1.17+](https://github.com/etcd-io/etcd/pull/15019).
+- Compile binaries using [Go 1.17.13](https://github.com/etcd-io/etcd/pull/15019)
+- Bumped [some dependencies](https://github.com/etcd-io/etcd/pull/15018) to address some HIGH Vulnerabilities.
+
+### Docker image
+- Use [distroless base image](https://github.com/etcd-io/etcd/pull/15016) to address critical Vulnerabilities.
+- Updated [base image from base-debian11 to static-debian11 and removed dependency on busybox](https://github.com/etcd-io/etcd/pull/15037).
+
+---
+
+## v3.5.6 (2022-11-21)
+
+### etcd server
+- Fix [auth invalid token and old revision errors in watch](https://github.com/etcd-io/etcd/pull/14547)
+- Fix [avoid closing a watch with ID 0 incorrectly](https://github.com/etcd-io/etcd/pull/14563)
+- Fix [auth: fix data consistency issue caused by recovery from snapshot](https://github.com/etcd-io/etcd/pull/14648)
+- Fix [revision might be inconsistency between members when etcd crashes during processing defragmentation operation](https://github.com/etcd-io/etcd/pull/14733)
+- Fix [timestamp in inconsistent format](https://github.com/etcd-io/etcd/pull/14799)
+- Fix [Failed resolving host due to lost DNS record](https://github.com/etcd-io/etcd/pull/14573)
+
+### Package `clientv3`
+- Fix [Add backoff before retry when watch stream returns unavailable](https://github.com/etcd-io/etcd/pull/14582).
+- Fix [stack overflow error in double barrier](https://github.com/etcd-io/etcd/pull/14658)
+- Fix [Refreshing token on CommonName based authentication causes segmentation violation in client](https://github.com/etcd-io/etcd/pull/14790).
+
+### etcd grpc-proxy
+- Add [`etcd grpc-proxy start --listen-cipher-suites`](https://github.com/etcd-io/etcd/pull/14500) flag to support adding configurable cipher list.
+
+---
+
+## v3.5.5 (2022-09-15)
+
+### Deprecations
+- Deprecated [SetKeepAlive and SetKeepAlivePeriod in limitListenerConn](https://github.com/etcd-io/etcd/pull/14366).
+
+### Package `clientv3`
+- Fix [do not overwrite authTokenBundle on dial](https://github.com/etcd-io/etcd/pull/14132).
+- Fix [IsOptsWithPrefix returns false even if WithPrefix() is included](https://github.com/etcd-io/etcd/pull/14187).
+
+### etcd server
+- [Build official darwin/arm64 artifacts](https://github.com/etcd-io/etcd/pull/14436).
+- Add [`etcd --max-concurrent-streams`](https://github.com/etcd-io/etcd/pull/14219) flag to configure the max concurrent streams each client can open at a time, and defaults to math.MaxUint32.
+- Add [`etcd --experimental-compact-hash-check-enabled --experimental-compact-hash-check-time`](https://github.com/etcd-io/etcd/issues/14039) flags to support enabling reliable corruption detection on compacted revisions.
+- Fix [unexpected error during txn](https://github.com/etcd-io/etcd/issues/14110).
 - Fix [lease leak issue due to tokenProvider isn't enabled when restoring auth store from a snapshot](https://github.com/etcd-io/etcd/pull/13205).
+- Fix [the race condition between goroutine and channel on the same leases to be revoked](https://github.com/etcd-io/etcd/pull/14087).
+- Fix [lessor may continue to schedule checkpoint after stepping down leader role](https://github.com/etcd-io/etcd/pull/14087).
+- Fix [Restrict the max size of each WAL entry to the remaining size of the WAL file](https://github.com/etcd-io/etcd/pull/14127).
+- Fix [Protect rangePermCache with a RW lock correctly](https://github.com/etcd-io/etcd/pull/14227)
+- Fix [memberID equals zero in corruption alarm](https://github.com/etcd-io/etcd/pull/14272)
+- Fix [Durability API guarantee broken in single node cluster](https://github.com/etcd-io/etcd/pull/14424)
+- Fix [etcd fails to start after performing alarm list operation and then power off/on](https://github.com/etcd-io/etcd/pull/14429)
+- Fix [authentication data not loaded on member startup](https://github.com/etcd-io/etcd/pull/14409)
+
+### etcdctl v3
+
+- Fix [etcdctl move-leader may fail for multiple endpoints](https://github.com/etcd-io/etcd/pull/14434)
+
 
 ### Other
 - [Bump golang.org/x/crypto to latest version](https://github.com/etcd-io/etcd/pull/13996) to address [CVE-2022-27191](https://github.com/advisories/GHSA-8c26-wmh5-6g9v).
+- [Bump OpenTelemetry to 1.0.1 and gRPC to 1.41.0](https://github.com/etcd-io/etcd/pull/14312).
 
-<hr>
+---
 
 ## v3.5.4 (2022-04-24)
 
@@ -24,7 +477,7 @@ Previous change logs can be found at [CHANGELOG-3.4](https://github.com/etcd-io/
 - [Revert the change of trimming the trailing dot from SRV.Target](https://github.com/etcd-io/etcd/pull/13950) returned by DNS lookup
 
 
-<hr>
+---
 
 ## v3.5.3 (2022-04-13)
 
@@ -45,7 +498,7 @@ Previous change logs can be found at [CHANGELOG-3.4](https://github.com/etcd-io/
 
 - [Always print the raft_term in decimal](https://github.com/etcd-io/etcd/pull/13727) when displaying member list in json.
 
-<hr>
+---
 
 ## [v3.5.2](https://github.com/etcd-io/etcd/releases/tag/v3.5.2) (2022-02-01)
 
@@ -58,7 +511,7 @@ See [code changes](https://github.com/etcd-io/etcd/compare/v3.5.1...v3.5.2) and 
 - Fix [assertion failed due to tx closed when recovering v3 backend from a snapshot db](https://github.com/etcd-io/etcd/pull/13501)
 - Fix [segmentation violation(SIGSEGV) error due to premature unlocking of watchableStore](https://github.com/etcd-io/etcd/pull/13541)
 
-<hr>
+---
 
 ## [v3.5.1](https://github.com/etcd-io/etcd/releases/tag/v3.5.1) (2021-10-15)
 
@@ -85,7 +538,7 @@ See [code changes](https://github.com/etcd-io/etcd/compare/v3.5.0...v3.5.1) and 
   - [CVE-2019-9893](https://nvd.nist.gov/vuln/detail/CVE-2019-9893): incorrect syscall argument generation in libseccomp
   - [CVE-2021-36159](https://nvd.nist.gov/vuln/detail/CVE-2021-36159): libfetch in apk-tools mishandles numeric strings in FTP and HTTP protocols to allow out of bound reads.
 
-<hr>
+---
 
 ## v3.5.0 (2021-06)
 
@@ -253,6 +706,7 @@ Note that any `etcd_debugging_*` metrics are experimental and subject to change.
 - Add [`etcd --experimental-distributed-tracing-address`](https://github.com/etcd-io/etcd/pull/12919) string flag which allows configuring the OpenTelemetry collector address.
 - Add [`etcd --experimental-distributed-tracing-service-name`](https://github.com/etcd-io/etcd/pull/12919) string flag which allows changing the default "etcd" service name.
 - Add [`etcd --experimental-distributed-tracing-instance-id`](https://github.com/etcd-io/etcd/pull/12919) string flag which configures an instance ID, which must be unique per etcd instance.
+- Add [`--experimental-bootstrap-defrag-threshold-megabytes`](https://github.com/etcd-io/etcd/pull/12941) which configures a threshold for the unused db size and etcdserver will automatically perform defragmentation on bootstrap when it exceeds this value. The functionality is disabled if the value is 0.
 
 ### Package `runtime`
 
@@ -313,7 +767,7 @@ Note that any `etcd_debugging_*` metrics are experimental and subject to change.
 - Add [`etcdctl member list -w=json --hex`](https://github.com/etcd-io/etcd/pull/11812) flag to print memberListResponse in hex format json.
 - Changed [`etcdctl lock <lockname> exec-command`](https://github.com/etcd-io/etcd/pull/12829) to return exit code of exec-command.
 - [New tool: `etcdutl`](https://github.com/etcd-io/etcd/pull/12971) incorporated functionality of: `etcdctl snapshot status|restore`, `etcdctl backup`, `etcdctl defrag --data-dir ...`.
-- [ETCDCTL_API=2 `etcdctl migrate`](https://github.com/etcd-io/etcd/pull/12971) has been decomissioned. Use etcd <=v3.4 to restore v2 storage.
+- [ETCDCTL_API=3 `etcdctl migrate`](https://github.com/etcd-io/etcd/pull/12971) has been decommissioned. Use etcd <=v3.4 to restore v2 storage.
 
 ### gRPC gateway
 
@@ -381,5 +835,5 @@ Note that any `etcd_debugging_*` metrics are experimental and subject to change.
 - The etcd team has added, a well defined and openly discussed, project [governance](https://github.com/etcd-io/etcd/pull/11175).
 
 
-<hr>
+---
 

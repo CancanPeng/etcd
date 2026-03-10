@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //go:build cluster_proxy
-// +build cluster_proxy
 
 package integration
 
@@ -21,7 +20,7 @@ import (
 	"context"
 	"sync"
 
-	"go.etcd.io/etcd/client/v3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/namespace"
 	"go.etcd.io/etcd/server/v3/proxy/grpcproxy"
 	"go.etcd.io/etcd/server/v3/proxy/grpcproxy/adapter"
@@ -39,13 +38,13 @@ const proxyNamespace = "proxy-namespace"
 type grpcClientProxy struct {
 	ctx       context.Context
 	ctxCancel func()
-	grpc      GrpcAPI
+	grpc      GRPCAPI
 	wdonec    <-chan struct{}
 	kvdonec   <-chan struct{}
 	lpdonec   <-chan struct{}
 }
 
-func ToGRPC(c *clientv3.Client) GrpcAPI {
+func ToGRPC(c *clientv3.Client) GRPCAPI {
 	pmu.Lock()
 	defer pmu.Unlock()
 
@@ -74,7 +73,7 @@ func ToGRPC(c *clientv3.Client) GrpcAPI {
 	lockp := grpcproxy.NewLockProxy(c)
 	electp := grpcproxy.NewElectionProxy(c)
 
-	grpc := GrpcAPI{
+	grpc := GRPCAPI{
 		adapter.ClusterServerToClusterClient(clp),
 		adapter.KvServerToKvClient(kvp),
 		adapter.LeaseServerToLeaseClient(lp),

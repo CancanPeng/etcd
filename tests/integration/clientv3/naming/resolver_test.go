@@ -16,38 +16,39 @@ package naming_test
 
 import (
 	"bytes"
-	"context"
+	"fmt"
+	"strconv"
 	"testing"
-	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	testpb "google.golang.org/grpc/interop/grpc_testing"
 
 	"go.etcd.io/etcd/client/v3/naming/endpoints"
 	"go.etcd.io/etcd/client/v3/naming/resolver"
-	"go.etcd.io/etcd/pkg/v3/grpc_testing"
-	integration2 "go.etcd.io/etcd/tests/v3/framework/integration"
-	"google.golang.org/grpc"
-	testpb "google.golang.org/grpc/test/grpc_testing"
+	"go.etcd.io/etcd/pkg/v3/grpctesting"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
-// This test mimics scenario described in grpc_naming.md doc.
-
-func TestEtcdGrpcResolver(t *testing.T) {
-	integration2.BeforeTest(t)
-
-	s1PayloadBody := []byte{'1'}
-	s1 := grpc_testing.NewDummyStubServer(s1PayloadBody)
+func testEtcdGRPCResolver(t *testing.T, lbPolicy string) {
+	// Setup two new dummy stub servers
+	payloadBody := []byte{'1'}
+	s1 := grpctesting.NewDummyStubServer(payloadBody)
 	if err := s1.Start(nil); err != nil {
 		t.Fatal("failed to start dummy grpc server (s1)", err)
 	}
 	defer s1.Stop()
 
-	s2PayloadBody := []byte{'2'}
-	s2 := grpc_testing.NewDummyStubServer(s2PayloadBody)
+	s2 := grpctesting.NewDummyStubServer(payloadBody)
 	if err := s2.Start(nil); err != nil {
 		t.Fatal("failed to start dummy grpc server (s2)", err)
 	}
 	defer s2.Stop()
 
-	clus := integration2.NewCluster(t, &integration2.ClusterConfig{Size: 3})
+	// Create new cluster with endpoint manager with two endpoints
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
 	defer clus.Terminate(t)
 
 	em, err := endpoints.NewManager(clus.Client(0), "foo")
@@ -58,7 +59,12 @@ func TestEtcdGrpcResolver(t *testing.T) {
 	e1 := endpoints.Endpoint{Addr: s1.Addr()}
 	e2 := endpoints.Endpoint{Addr: s2.Addr()}
 
-	err = em.AddEndpoint(context.TODO(), "foo/e1", e1)
+	err = em.AddEndpoint(t.Context(), "foo/e1", e1)
+	if err != nil {
+		t.Fatal("failed to add foo", err)
+	}
+
+	err = em.AddEndpoint(t.Context(), "foo/e2", e2)
 	if err != nil {
 		t.Fatal("failed to add foo", err)
 	}
@@ -68,46 +74,106 @@ func TestEtcdGrpcResolver(t *testing.T) {
 		t.Fatal("failed to new resolver builder", err)
 	}
 
-	conn, err := grpc.Dial("etcd:///foo", grpc.WithInsecure(), grpc.WithResolvers(b))
+	// Create connection with provided lb policy
+	conn, err := grpc.NewClient("etcd:///foo", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithResolvers(b),
+		grpc.WithDefaultServiceConfig(fmt.Sprintf(`{"loadBalancingPolicy":"%s"}`, lbPolicy)))
 	if err != nil {
 		t.Fatal("failed to connect to foo", err)
 	}
 	defer conn.Close()
 
+	// Send an initial request that should go to e1
 	c := testpb.NewTestServiceClient(conn)
-	resp, err := c.UnaryCall(context.TODO(), &testpb.SimpleRequest{}, grpc.WaitForReady(true))
+	resp, err := c.UnaryCall(t.Context(), &testpb.SimpleRequest{}, grpc.WaitForReady(true))
 	if err != nil {
 		t.Fatal("failed to invoke rpc to foo (e1)", err)
 	}
-	if resp.GetPayload() == nil || !bytes.Equal(resp.GetPayload().GetBody(), s1PayloadBody) {
+	if resp.GetPayload() == nil || !bytes.Equal(resp.GetPayload().GetBody(), payloadBody) {
 		t.Fatalf("unexpected response from foo (e1): %s", resp.GetPayload().GetBody())
 	}
 
-	em.DeleteEndpoint(context.TODO(), "foo/e1")
-	em.AddEndpoint(context.TODO(), "foo/e2", e2)
-
-	// We use a loop with deadline of 30s to avoid test getting flake
-	// as it's asynchronous for gRPC Client to update underlying connections.
-	maxRetries := 300
-	retryPeriod := 100 * time.Millisecond
-	retries := 0
-	for {
-		time.Sleep(retryPeriod)
-		retries++
-
-		resp, err = c.UnaryCall(context.TODO(), &testpb.SimpleRequest{})
+	// Send more requests
+	lastResponse := []byte{'1'}
+	totalRequests := 3500
+	for i := 1; i < totalRequests; i++ {
+		resp, err := c.UnaryCall(t.Context(), &testpb.SimpleRequest{}, grpc.WaitForReady(true))
 		if err != nil {
-			if retries < maxRetries {
-				continue
-			}
-			t.Fatal("failed to invoke rpc to foo (e2)", err)
+			t.Fatal("failed to invoke rpc to foo", err)
 		}
-		if resp.GetPayload() == nil || !bytes.Equal(resp.GetPayload().GetBody(), s2PayloadBody) {
-			if retries < maxRetries {
-				continue
-			}
-			t.Fatalf("unexpected response from foo (e2): %s", resp.GetPayload().GetBody())
-		}
-		break
+
+		t.Logf("Response: %v", string(resp.GetPayload().GetBody()))
+
+		require.NotNilf(t, resp.GetPayload(), "unexpected response from foo: %s", resp.GetPayload().GetBody())
+		lastResponse = resp.GetPayload().GetBody()
 	}
+
+	// If the load balancing policy is pick first then return payload should equal number of requests
+	t.Logf("Last response: %v", string(lastResponse))
+	if lbPolicy == "pick_first" {
+		require.Equalf(t, "3500", string(lastResponse), "unexpected total responses from foo: %s", lastResponse)
+	}
+
+	// If the load balancing policy is round robin we should see roughly half total requests served by each server
+	if lbPolicy == "round_robin" {
+		responses, err := strconv.Atoi(string(lastResponse))
+		require.NoErrorf(t, err, "couldn't convert to int: %s", lastResponse)
+
+		// Allow 25% tolerance as round robin is not perfect and we don't want the test to flake
+		expected := float64(totalRequests) * 0.5
+		assert.InEpsilonf(t, expected, float64(responses), 0.25, "unexpected total responses from foo: %s", lastResponse)
+	}
+}
+
+// TestEtcdGrpcResolverPickFirst mimics scenarios described in grpc_naming.md doc.
+func TestEtcdGrpcResolverPickFirst(t *testing.T) {
+	integration.BeforeTest(t)
+
+	// Pick first is the default load balancer policy for grpc-go
+	testEtcdGRPCResolver(t, "pick_first")
+}
+
+// TestEtcdGrpcResolverRoundRobin mimics scenarios described in grpc_naming.md doc.
+func TestEtcdGrpcResolverRoundRobin(t *testing.T) {
+	integration.BeforeTest(t)
+
+	// Round robin is a common alternative for more production oriented scenarios
+	testEtcdGRPCResolver(t, "round_robin")
+}
+
+func TestEtcdEndpointManager(t *testing.T) {
+	integration.BeforeTest(t)
+
+	s1PayloadBody := []byte{'1'}
+	s1 := grpctesting.NewDummyStubServer(s1PayloadBody)
+	err := s1.Start(nil)
+	require.NoError(t, err)
+	defer s1.Stop()
+
+	s2PayloadBody := []byte{'2'}
+	s2 := grpctesting.NewDummyStubServer(s2PayloadBody)
+	err = s2.Start(nil)
+	require.NoError(t, err)
+	defer s2.Stop()
+
+	clus := integration.NewCluster(t, &integration.ClusterConfig{Size: 3})
+	defer clus.Terminate(t)
+
+	// Check if any endpoint with the same prefix "foo" will not break the logic with multiple endpoints
+	em, err := endpoints.NewManager(clus.Client(0), "foo")
+	require.NoError(t, err)
+	emOther, err := endpoints.NewManager(clus.Client(1), "foo_other")
+	require.NoError(t, err)
+
+	e1 := endpoints.Endpoint{Addr: s1.Addr()}
+	e2 := endpoints.Endpoint{Addr: s2.Addr()}
+
+	em.AddEndpoint(t.Context(), "foo/e1", e1)
+	emOther.AddEndpoint(t.Context(), "foo_other/e2", e2)
+
+	epts, err := em.List(t.Context())
+	require.NoError(t, err)
+	eptsOther, err := emOther.List(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, epts, 1)
+	assert.Len(t, eptsOther, 1)
 }

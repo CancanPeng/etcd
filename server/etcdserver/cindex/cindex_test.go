@@ -20,16 +20,16 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap/zaptest"
+
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	betesting "go.etcd.io/etcd/server/v3/storage/backend/testing"
 	"go.etcd.io/etcd/server/v3/storage/schema"
-	"go.uber.org/zap/zaptest"
 )
 
 // TestConsistentIndex ensures that LoadConsistentIndex/Save/ConsistentIndex and backend.BatchTx can work well together.
 func TestConsistentIndex(t *testing.T) {
-
 	be, tmpPath := betesting.NewTmpBackend(t, time.Microsecond, 10)
 	ci := NewConsistentIndex(be)
 
@@ -116,7 +116,7 @@ func TestConsistentIndexDecrease(t *testing.T) {
 				tx.Lock()
 				defer tx.Unlock()
 				if tc.panicExpected {
-					assert.Panics(t, func() { ci.UnsafeSave(tx) }, "Should refuse to decrease cindex")
+					assert.Panicsf(t, func() { ci.UnsafeSave(tx) }, "Should refuse to decrease cindex")
 					return
 				}
 				ci.UnsafeSave(tx)
@@ -132,7 +132,6 @@ func TestConsistentIndexDecrease(t *testing.T) {
 }
 
 func TestFakeConsistentIndex(t *testing.T) {
-
 	r := rand.Uint64()
 	ci := NewFakeConsistentIndex(r)
 	index := ci.ConsistentIndex()
@@ -145,5 +144,4 @@ func TestFakeConsistentIndex(t *testing.T) {
 	if index != r {
 		t.Errorf("expected %d,got %d", r, index)
 	}
-
 }

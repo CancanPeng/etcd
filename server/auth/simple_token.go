@@ -131,10 +131,11 @@ func (t *tokenSimple) assignSimpleTokenToUser(username, token string) {
 
 	_, ok := t.simpleTokens[token]
 	if ok {
+		tokenFingerprint := redactToken(token)
 		t.lg.Panic(
 			"failed to assign already-used simple token to a user",
 			zap.String("user-name", username),
-			zap.String("token", token),
+			zap.String("token-fingerprint", tokenFingerprint),
 		)
 	}
 
@@ -168,7 +169,7 @@ func (t *tokenSimple) enable() {
 
 	delf := func(tk string) {
 		if username, ok := t.simpleTokens[tk]; ok {
-			t.lg.Info(
+			t.lg.Debug(
 				"deleted a simple token",
 				zap.String("user-name", username),
 				zap.String("token", tk),
@@ -236,7 +237,7 @@ func (t *tokenSimple) isValidSimpleToken(ctx context.Context, token string) bool
 	}
 
 	select {
-	case <-t.indexWaiter(uint64(index)):
+	case <-t.indexWaiter(index):
 		return true
 	case <-ctx.Done():
 	}

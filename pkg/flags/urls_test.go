@@ -18,6 +18,9 @@ import (
 	"net/url"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidateURLsValueBad(t *testing.T) {
@@ -29,9 +32,6 @@ func TestValidateURLsValueBad(t *testing.T) {
 		// bad port specification
 		"127.0.0.1:foo",
 		"127.0.0.1:",
-		// unix sockets not supported
-		"unix://",
-		"unix://tmp/etcd.sock",
 		// bad strings
 		"somewhere",
 		"234#$",
@@ -41,9 +41,7 @@ func TestValidateURLsValueBad(t *testing.T) {
 	}
 	for i, in := range tests {
 		u := URLsValue{}
-		if err := u.Set(in); err == nil {
-			t.Errorf(`#%d: unexpected nil error for in=%q`, i, in)
-		}
+		assert.Errorf(t, u.Set(in), `#%d: unexpected nil error for in=%q`, i, in)
 	}
 }
 
@@ -56,6 +54,9 @@ func TestNewURLsValue(t *testing.T) {
 		{s: "http://10.1.1.1:80", exp: []url.URL{{Scheme: "http", Host: "10.1.1.1:80"}}},
 		{s: "http://localhost:80", exp: []url.URL{{Scheme: "http", Host: "localhost:80"}}},
 		{s: "http://:80", exp: []url.URL{{Scheme: "http", Host: ":80"}}},
+		{s: "unix://tmp/etcd.sock", exp: []url.URL{{Scheme: "unix", Host: "tmp", Path: "/etcd.sock"}}},
+		{s: "unix:///tmp/127.27.84.4:23432", exp: []url.URL{{Scheme: "unix", Path: "/tmp/127.27.84.4:23432"}}},
+		{s: "unix://127.0.0.5:1456", exp: []url.URL{{Scheme: "unix", Host: "127.0.0.5:1456"}}},
 		{
 			s: "http://localhost:1,https://localhost:2",
 			exp: []url.URL{
@@ -66,8 +67,6 @@ func TestNewURLsValue(t *testing.T) {
 	}
 	for i := range tests {
 		uu := []url.URL(*NewURLsValue(tests[i].s))
-		if !reflect.DeepEqual(tests[i].exp, uu) {
-			t.Fatalf("#%d: expected %+v, got %+v", i, tests[i].exp, uu)
-		}
+		require.Truef(t, reflect.DeepEqual(tests[i].exp, uu), "#%d: expected %+v, got %+v", i, tests[i].exp, uu)
 	}
 }

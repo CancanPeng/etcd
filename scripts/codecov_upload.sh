@@ -1,18 +1,31 @@
 #!/usr/bin/env bash
+# Copyright 2025 The etcd Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# Script used to collect and upload test coverage (mostly by travis).
-# Usage ./test_coverage_upload.sh [log_file]
+# Script used to collect and upload test coverage.
 
 set -o pipefail
 
-LOG_FILE=${1:-test-coverage.log}
-
-# We collect the coverage
-COVERDIR=covdir PASSES='build build_cov cov' ./scripts/test.sh 2>&1 | tee "${LOG_FILE}"
-test_success="$?"
-
 # We try to upload whatever we have:
-bash <(curl -s https://codecov.io/bash) -f ./covdir/all.coverprofile -cF all || exit 2
+mkdir -p bin
+curl -sf -o ./bin/codecov.sh https://codecov.io/bash
 
-# Expose the original status of the test coverage execution.
-exit ${test_success}
+bash ./bin/codecov.sh -f "${COVERDIR}/all.coverprofile" \
+  -cF all \
+  -C "${PULL_PULL_SHA:-${PULL_BASE_SHA}}" \
+  -r "${REPO_OWNER}/${REPO_NAME}" \
+  -P "${PULL_NUMBER}" \
+  -b "${BUILD_ID}" \
+  -B "${PULL_BASE_REF}" \
+  -N "${PULL_BASE_SHA}"

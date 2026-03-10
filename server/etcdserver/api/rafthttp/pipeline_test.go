@@ -23,12 +23,13 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap/zaptest"
+
 	"go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/testutil"
 	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/raft/v3/raftpb"
 	stats "go.etcd.io/etcd/server/v3/etcdserver/api/v2stats"
-	"go.uber.org/zap/zaptest"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 // TestPipelineSend tests that pipeline could send data using roundtripper
@@ -271,11 +272,12 @@ type respRoundTripper struct {
 func newRespRoundTripper(code int, err error) *respRoundTripper {
 	return &respRoundTripper{code: code, err: err}
 }
+
 func (t *respRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.rec != nil {
-		t.rec.Record(testutil.Action{Name: "req", Params: []interface{}{req}})
+		t.rec.Record(testutil.Action{Name: "req", Params: []any{req}})
 	}
 	return &http.Response{StatusCode: t.code, Header: t.header, Body: &nopReadCloser{}}, t.err
 }
@@ -286,7 +288,7 @@ type roundTripperRecorder struct {
 
 func (t *roundTripperRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.rec != nil {
-		t.rec.Record(testutil.Action{Name: "req", Params: []interface{}{req}})
+		t.rec.Record(testutil.Action{Name: "req", Params: []any{req}})
 	}
 	return &http.Response{StatusCode: http.StatusNoContent, Body: &nopReadCloser{}}, nil
 }

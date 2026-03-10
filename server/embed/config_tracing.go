@@ -23,8 +23,10 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	"go.uber.org/zap"
+
+	"go.etcd.io/etcd/pkg/v3/traceutil"
 )
 
 const maxSamplingRatePerMillion = 1000000
@@ -40,34 +42,50 @@ func validateTracingConfig(samplingRate int) error {
 	return nil
 }
 
-func setupTracingExporter(ctx context.Context, cfg *Config) (exporter tracesdk.SpanExporter, options []otelgrpc.Option, err error) {
-	exporter, err = otlptracegrpc.New(ctx,
+type tracingExporter struct {
+	exporter tracesdk.SpanExporter
+	opts     []otelgrpc.Option
+	provider *tracesdk.TracerProvider
+}
+
+func newTracingExporter(ctx context.Context, cfg *Config) (*tracingExporter, error) {
+	exporter, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithInsecure(),
-		otlptracegrpc.WithEndpoint(cfg.ExperimentalDistributedTracingAddress),
+		otlptracegrpc.WithEndpoint(cfg.DistributedTracingAddress),
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
-			semconv.ServiceNameKey.String(cfg.ExperimentalDistributedTracingServiceName),
+			semconv.ServiceNameKey.String(cfg.DistributedTracingServiceName),
 		),
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	if resWithIDKey := determineResourceWithIDKey(cfg.ExperimentalDistributedTracingServiceInstanceID); resWithIDKey != nil {
+	if resWithIDKey := determineResourceWithIDKey(cfg.DistributedTracingServiceInstanceID); resWithIDKey != nil {
 		// Merge resources into a new
 		// resource in case of duplicates.
 		res, err = resource.Merge(res, resWithIDKey)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 
-	options = append(options,
+	traceProvider := tracesdk.NewTracerProvider(
+		tracesdk.WithBatcher(exporter),
+		tracesdk.WithResource(res),
+		tracesdk.WithSampler(
+			tracesdk.ParentBased(determineSampler(cfg.DistributedTracingSamplingRatePerMillion)),
+		),
+	)
+
+	traceutil.Init(traceProvider)
+
+	options := []otelgrpc.Option{
 		otelgrpc.WithPropagators(
 			propagation.NewCompositeTextMapPropagator(
 				propagation.TraceContext{},
@@ -75,25 +93,32 @@ func setupTracingExporter(ctx context.Context, cfg *Config) (exporter tracesdk.S
 			),
 		),
 		otelgrpc.WithTracerProvider(
-			tracesdk.NewTracerProvider(
-				tracesdk.WithBatcher(exporter),
-				tracesdk.WithResource(res),
-				tracesdk.WithSampler(
-					tracesdk.ParentBased(determineSampler(cfg.ExperimentalDistributedTracingSamplingRatePerMillion)),
-				),
-			),
+			traceProvider,
 		),
-	)
+	}
 
 	cfg.logger.Debug(
 		"distributed tracing enabled",
-		zap.String("address", cfg.ExperimentalDistributedTracingAddress),
-		zap.String("service-name", cfg.ExperimentalDistributedTracingServiceName),
-		zap.String("service-instance-id", cfg.ExperimentalDistributedTracingServiceInstanceID),
-		zap.Int("sampling-rate", cfg.ExperimentalDistributedTracingSamplingRatePerMillion),
+		zap.String("address", cfg.DistributedTracingAddress),
+		zap.String("service-name", cfg.DistributedTracingServiceName),
+		zap.String("service-instance-id", cfg.DistributedTracingServiceInstanceID),
+		zap.Int("sampling-rate", cfg.DistributedTracingSamplingRatePerMillion),
 	)
 
-	return exporter, options, err
+	return &tracingExporter{
+		exporter: exporter,
+		opts:     options,
+		provider: traceProvider,
+	}, nil
+}
+
+func (te *tracingExporter) Close(ctx context.Context) {
+	if te.provider != nil {
+		te.provider.Shutdown(ctx)
+	}
+	if te.exporter != nil {
+		te.exporter.Shutdown(ctx)
+	}
 }
 
 func determineSampler(samplingRate int) tracesdk.Sampler {

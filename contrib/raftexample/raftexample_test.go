@@ -21,10 +21,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
-	"go.etcd.io/etcd/raft/v3/raftpb"
+	"github.com/stretchr/testify/require"
+
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 func getSnapshotFn() (func() ([]byte, error), <-chan struct{}) {
@@ -77,7 +80,7 @@ func newCluster(n int) *cluster {
 func (clus *cluster) Close() (err error) {
 	for i := range clus.peers {
 		go func(i int) {
-			for range clus.commitC[i] {
+			for range clus.commitC[i] { //revive:disable-line:empty-block
 				// drain pending commits
 			}
 		}(i)
@@ -95,9 +98,8 @@ func (clus *cluster) Close() (err error) {
 
 func (clus *cluster) closeNoErrors(t *testing.T) {
 	t.Log("closing cluster...")
-	if err := clus.Close(); err != nil {
-		t.Fatal(err)
-	}
+	err := clus.Close()
+	require.NoError(t, err)
 	t.Log("closing cluster [done]")
 }
 
@@ -124,7 +126,7 @@ func TestProposeOnCommit(t *testing.T) {
 				}
 			}
 			donec <- struct{}{}
-			for range cC {
+			for range cC { //revive:disable-line:empty-block
 				// acknowledge the commits from other nodes so
 				// raft continues to make progress
 			}
@@ -152,16 +154,20 @@ func TestCloseProposerInflight(t *testing.T) {
 	clus := newCluster(1)
 	defer clus.closeNoErrors(t)
 
+	var wg sync.WaitGroup
+
 	// some inflight ops
-	go func() {
+	wg.Go(func() {
 		clus.proposeC[0] <- "foo"
 		clus.proposeC[0] <- "bar"
-	}()
+	})
 
 	// wait for one message
 	if c, ok := <-clus.commitC[0]; !ok || c.data[0] != "foo" {
 		t.Fatalf("Commit failed")
 	}
+
+	wg.Wait()
 }
 
 func TestPutAndGetKeyValue(t *testing.T) {
@@ -193,33 +199,24 @@ func TestPutAndGetKeyValue(t *testing.T) {
 	body := bytes.NewBufferString(wantValue)
 	cli := srv.Client()
 
-	req, err := http.NewRequest("PUT", url, body)
-	if err != nil {
-		t.Fatal(err)
-	}
+	req, err := http.NewRequest(http.MethodPut, url, body)
+	require.NoError(t, err)
 	req.Header.Set("Content-Type", "text/html; charset=utf-8")
 	_, err = cli.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	// wait for a moment for processing message, otherwise get would be failed.
 	<-time.After(time.Second)
 
 	resp, err := cli.Get(url)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	if gotValue := string(data); wantValue != gotValue {
-		t.Fatalf("expect %s, got %s", wantValue, gotValue)
-	}
+	gotValue := string(data)
+	require.Equalf(t, wantValue, gotValue, "expect %s, got %s", wantValue, gotValue)
 }
 
 // TestAddNewNode tests adding new node to the existing cluster.

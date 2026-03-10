@@ -23,11 +23,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"go.etcd.io/etcd/client/v3"
+	"github.com/spf13/cobra"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
-
-	"github.com/spf13/cobra"
 )
 
 var lockTTL = 10
@@ -35,9 +35,10 @@ var lockTTL = 10
 // NewLockCommand returns the cobra command for "lock".
 func NewLockCommand() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "lock <lockname> [exec-command arg1 arg2 ...]",
-		Short: "Acquires a named lock",
-		Run:   lockCommandFunc,
+		Use:     "lock <lockname> [exec-command arg1 arg2 ...]",
+		Short:   "Acquires a named lock",
+		Run:     lockCommandFunc,
+		GroupID: groupConcurrencyID,
 	}
 	c.Flags().IntVarP(&lockTTL, "ttl", "", lockTTL, "timeout for session")
 	return c
@@ -59,7 +60,8 @@ func getExitCodeFromError(err error) int {
 		return cobrautl.ExitSuccess
 	}
 
-	if exitErr, ok := err.(*exec.ExitError); ok {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
 			return status.ExitStatus()
 		}

@@ -1,19 +1,29 @@
 #!/usr/bin/env bash
+# Copyright 2025 The etcd Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-set -e
+set -euo pipefail
 
 source ./scripts/test_lib.sh
 
-VER=$1
+VER=${1:-}
 REPOSITORY="${REPOSITORY:-git@github.com:etcd-io/etcd.git}"
 
-
-if [ -z "$1" ]; then
+if [ -z "$VER" ]; then
   echo "Usage: ${0} VERSION" >> /dev/stderr
   exit 255
 fi
-
-set -u
 
 function setup_env {
   local ver=${1}
@@ -25,9 +35,7 @@ function setup_env {
 
   pushd "${proj}" >/dev/null
     run git fetch --all
-    git_assert_branch_in_sync || exit 2
     run git checkout "${ver}"
-    git_assert_branch_in_sync || exit 2
   popd >/dev/null
 }
 
@@ -63,7 +71,7 @@ function main {
   cd release
   setup_env "${VER}" "${proj}"
 
-  tarcmd=tar
+  local tarcmd=tar
   if [[ $(go env GOOS) == "darwin" ]]; then
       echo "Please use linux machine for release builds."
     exit 1
@@ -87,7 +95,7 @@ function main {
       export GOARCH=${TARGET_ARCH}
 
       pushd etcd >/dev/null
-      GO_LDFLAGS="-s" ./scripts/build.sh
+      GO_LDFLAGS="-s -w" ./scripts/build.sh
       popd >/dev/null
 
       TARGET="etcd-${VER}-${GOOS}-${GOARCH}"

@@ -69,11 +69,10 @@ func TestLockVerify(t *testing.T) {
 			expectPanic: false,
 		},
 	}
-	revertVerifyFunc := verify.EnableVerifications(backend.ENV_VERIFY_VALUE_LOCK)
+	revertVerifyFunc := verify.EnableVerifications(backend.EnvVerifyValueLock)
 	defer revertVerifyFunc()
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-
 			be, _ := betesting.NewTmpBackend(t, time.Hour, 10000)
 			be.SetTxPostLockInsideApplyHook(tc.txPostLockInsideApplyHook)
 
@@ -91,7 +90,7 @@ func TestLockVerify(t *testing.T) {
 	}
 }
 
-func handlePanic(f func()) (result interface{}) {
+func handlePanic(f func()) (result any) {
 	defer func() {
 		result = recover()
 	}()

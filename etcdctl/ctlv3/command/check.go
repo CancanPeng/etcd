@@ -26,13 +26,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cheggaaa/pb/v3"
+	"github.com/spf13/cobra"
+	"golang.org/x/time/rate"
+
 	v3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/pkg/v3/cobrautl"
 	"go.etcd.io/etcd/pkg/v3/report"
-
-	"github.com/spf13/cobra"
-	"golang.org/x/time/rate"
-	"gopkg.in/cheggaaa/pb.v1"
 )
 
 var (
@@ -107,8 +107,10 @@ var checkDatascaleCfgMap = map[string]checkDatascaleCfg{
 // NewCheckCommand returns the cobra command for "check".
 func NewCheckCommand() *cobra.Command {
 	cc := &cobra.Command{
-		Use:   "check <subcommand>",
-		Short: "commands for checking properties of the etcd cluster",
+		Use:     "check <subcommand>",
+		Short:   "commands for checking properties of the etcd cluster. Use `etcdctl check --help` to see subcommands",
+		Long:    "commands for checking properties of the etcd cluster",
+		GroupID: groupUtilityID,
 	}
 
 	cc.AddCommand(NewCheckPerfCommand())
@@ -126,7 +128,7 @@ func NewCheckPerfCommand() *cobra.Command {
 	}
 
 	// TODO: support customized configuration
-	cmd.Flags().StringVar(&checkPerfLoad, "load", "s", "The performance check's workload model. Accepted workloads: s(small), m(medium), l(large), xl(xLarge)")
+	cmd.Flags().StringVar(&checkPerfLoad, "load", "s", "The performance check's workload model. Accepted workloads: s(small), m(medium), l(large), xl(xLarge). Different workload models use different configurations in terms of number of clients and expected throughput.")
 	cmd.Flags().StringVar(&checkPerfPrefix, "prefix", "/etcdctl-check-perf/", "The prefix for writing the performance check's keys.")
 	cmd.Flags().BoolVar(&autoCompact, "auto-compact", false, "Compact storage with last revision after test is finished.")
 	cmd.Flags().BoolVar(&autoDefrag, "auto-defrag", false, "Defragment storage after test is finished.")
@@ -139,7 +141,7 @@ func NewCheckPerfCommand() *cobra.Command {
 
 // newCheckPerfCommand executes the "check perf" command.
 func newCheckPerfCommand(cmd *cobra.Command, args []string) {
-	var checkPerfAlias = map[string]string{
+	checkPerfAlias := map[string]string{
 		"s": "s", "small": "s",
 		"m": "m", "medium": "m",
 		"l": "l", "large": "l",
@@ -180,10 +182,9 @@ func newCheckPerfCommand(cmd *cobra.Command, args []string) {
 	k, v := make([]byte, ksize), string(make([]byte, vsize))
 
 	bar := pb.New(cfg.duration)
-	bar.Format("Bom !")
 	bar.Start()
 
-	r := report.NewReport("%4.4f")
+	r := report.NewReport("%4.4f", "", false)
 	var wg sync.WaitGroup
 
 	wg.Add(len(clients))
@@ -258,12 +259,11 @@ func newCheckPerfCommand(cmd *cobra.Command, args []string) {
 		fmt.Printf("PASS: Stddev is %fs\n", s.Stddev)
 	}
 
-	if ok {
-		fmt.Println("PASS")
-	} else {
+	if !ok {
 		fmt.Println("FAIL")
 		os.Exit(cobrautl.ExitError)
 	}
+	fmt.Println("PASS")
 }
 
 func attemptCleanup(client *v3.Client, autoCompact bool) {
@@ -313,7 +313,7 @@ func NewCheckDatascaleCommand() *cobra.Command {
 
 // newCheckDatascaleCommand executes the "check datascale" command.
 func newCheckDatascaleCommand(cmd *cobra.Command, args []string) {
-	var checkDatascaleAlias = map[string]string{
+	checkDatascaleAlias := map[string]string{
 		"s": "s", "small": "s",
 		"m": "m", "medium": "m",
 		"l": "l", "large": "l",
@@ -355,7 +355,7 @@ func newCheckDatascaleCommand(cmd *cobra.Command, args []string) {
 	ksize, vsize := 512, 512
 	k, v := make([]byte, ksize), string(make([]byte, vsize))
 
-	r := report.NewReport("%4.4f")
+	r := report.NewReport("%4.4f", "", false)
 	var wg sync.WaitGroup
 	wg.Add(len(clients))
 
@@ -366,9 +366,8 @@ func newCheckDatascaleCommand(cmd *cobra.Command, args []string) {
 		os.Exit(cobrautl.ExitError)
 	}
 
-	fmt.Println(fmt.Sprintf("Start data scale check for work load [%v key-value pairs, %v bytes per key-value, %v concurrent clients].", cfg.limit, cfg.kvSize, cfg.clients))
+	fmt.Printf("Start data scale check for work load [%v key-value pairs, %v bytes per key-value, %v concurrent clients].\n", cfg.limit, cfg.kvSize, cfg.clients)
 	bar := pb.New(cfg.limit)
-	bar.Format("Bom !")
 	bar.Start()
 
 	for i := range clients {
@@ -436,7 +435,6 @@ func newCheckDatascaleCommand(cmd *cobra.Command, args []string) {
 			fmt.Printf("FAIL: ERROR(%v) -> %d\n", k, v)
 		}
 		os.Exit(cobrautl.ExitError)
-	} else {
-		fmt.Println(fmt.Sprintf("PASS: Approximate system memory used : %v MB.", strconv.FormatFloat(mbUsed, 'f', 2, 64)))
 	}
+	fmt.Printf("PASS: Approximate system memory used : %v MB.\n", strconv.FormatFloat(mbUsed, 'f', 2, 64))
 }

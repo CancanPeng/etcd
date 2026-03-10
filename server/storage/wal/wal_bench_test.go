@@ -17,8 +17,10 @@ package wal
 import (
 	"testing"
 
-	"go.etcd.io/etcd/raft/v3/raftpb"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
+
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 func BenchmarkWrite100EntryWithoutBatch(b *testing.B) { benchmarkWriteEntry(b, 100, 0) }
@@ -37,9 +39,7 @@ func benchmarkWriteEntry(b *testing.B, size int, batch int) {
 	p := b.TempDir()
 
 	w, err := Create(zaptest.NewLogger(b), p, []byte("somedata"))
-	if err != nil {
-		b.Fatalf("err = %v, want nil", err)
-	}
+	require.NoErrorf(b, err, "err = %v, want nil", err)
 	data := make([]byte, size)
 	for i := 0; i < size; i++ {
 		data[i] = byte(i)
